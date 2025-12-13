@@ -1,0 +1,14 @@
+# Ignore virtual environments
+.venv/
+venv/
+/setup/__pycache__/
+/colmap
+/utils/__pycache__/
+/__pycache__
+/input/
+/logs/
+/processed/
+/reconstructions/
+colmap.zip
+/evaluations/
+/glomap
