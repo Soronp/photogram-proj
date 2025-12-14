@@ -12,3 +12,4 @@ venv/
 colmap.zip
 /evaluations/
 /glomap
+/ffmpeg
