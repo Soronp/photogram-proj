@@ -13,3 +13,15 @@ colmap.zip
 /evaluations/
 /glomap
 /ffmpeg
+config.yaml
+/images
+/images_filtered
+/dense
+/database
+/mesh
+/evaluation
+/sparse
+/textures
+/raw
+/project.json
+/images_processed

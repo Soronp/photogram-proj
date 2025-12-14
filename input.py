@@ -1,100 +1,189 @@
-import os
-import cv2
-import hashlib
-from utils.config import PATHS
-from utils.logger import get_logger
+#!/usr/bin/env python3
+"""
+input_ingest.py
+
+Normalize raw inputs into a clean image dataset.
+
+Responsibilities:
+- Detect input type (images vs video)
+- Copy or extract frames into images/
+- Prevent duplicate frames/images
+- Enforce normalized frame naming
+- Record frame metadata
+
+Assumptions:
+- ffmpeg is available in PATH
+- This script is safe to re-run
+"""
+
+import argparse
 import subprocess
+import hashlib
+import json
+import shutil
+from pathlib import Path
 
-logger = get_logger()
+from utils.logger import get_logger
+from utils.paths import ProjectPaths
 
-def get_image_files(folder):
-    """Return list of image file paths in folder"""
-    exts = (".jpg", ".jpeg", ".png", ".tif")
-    return [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(exts)]
+SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
+SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv"}
 
-def normalize_image(img_path, output_folder, resize=(1024, 768)):
-    """Read, resize, and save image to output folder"""
-    os.makedirs(output_folder, exist_ok=True)
-    img = cv2.imread(img_path)
-    if img is None:
-        logger.warning(f"Failed to read: {img_path}")
-        return None
-    img_resized = cv2.resize(img, resize)
-    filename = os.path.basename(img_path)
-    save_path = os.path.join(output_folder, filename)
-    cv2.imwrite(save_path, img_resized)
-    logger.info(f"Normalized image: {filename}")
-    return save_path
 
-def remove_duplicates(image_paths):
-    """Remove exact duplicates using hashing"""
-    hash_dict = {}
-    unique_images = []
-    for path in image_paths:
-        with open(path, "rb") as f:
-            h = hashlib.md5(f.read()).hexdigest()
-        if h not in hash_dict:
-            hash_dict[h] = path
-            unique_images.append(path)
-        else:
-            logger.info(f"Duplicate removed: {os.path.basename(path)}")
-            os.remove(path)
-    return unique_images
+def parse_args():
+    parser = argparse.ArgumentParser(description="Ingest images or video into project")
+    parser.add_argument("--project", required=True, help="Path to project root")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing images")
+    return parser.parse_args()
 
-def extract_frames_from_videos(video_folder, output_folder, frame_rate=1, use_ffmpeg=False):
-    """Extract frames from videos using OpenCV or ffmpeg"""
-    os.makedirs(output_folder, exist_ok=True)
-    videos = [f for f in os.listdir(video_folder) if f.lower().endswith((".mp4", ".mov", ".avi"))]
-    
-    for vid in videos:
-        video_path = os.path.join(video_folder, vid)
-        if use_ffmpeg:
-            # Using ffmpeg (faster and more reliable for large videos)
-            output_pattern = os.path.join(output_folder, f"{os.path.splitext(vid)[0]}_frame%05d.jpg")
-            cmd = [
-                "ffmpeg",
-                "-i", video_path,
-                "-vf", f"fps={frame_rate}",
-                output_pattern
-            ]
-            logger.info(f"Running ffmpeg for {vid}")
-            subprocess.run(cmd, check=True)
-        else:
-            # Fallback: OpenCV extraction
-            cap = cv2.VideoCapture(video_path)
-            frame_count = 0
-            saved_count = 0
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                if frame_count % frame_rate == 0:
-                    filename = f"{os.path.splitext(vid)[0]}_frame{frame_count:05d}.jpg"
-                    save_path = os.path.join(output_folder, filename)
-                    cv2.imwrite(save_path, frame)
-                    saved_count += 1
-                frame_count += 1
-            cap.release()
-            logger.info(f"Extracted {saved_count} frames from {vid}")
 
-def run_input_handler(frame_rate=1, use_ffmpeg=False):
-    """Main function for automated input handling"""
-    logger.info("Starting input handling...")
+def file_hash(path: Path, chunk_size=8192) -> str:
+    """Compute SHA1 hash for duplicate detection."""
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-    # Step 1: Extract frames from videos (if any)
-    if os.path.exists(PATHS['input_videos']):
-        extract_frames_from_videos(PATHS['input_videos'], PATHS['input_images'], frame_rate, use_ffmpeg)
 
-    # Step 2: Normalize images
-    image_files = get_image_files(PATHS['input_images'])
-    for img_path in image_files:
-        normalize_image(img_path, PATHS['normalized'])
+def ingest_images(raw_dir: Path, images_dir: Path, logger):
+    logger.info("Ingesting image files")
 
-    # Step 3: Remove duplicates
-    normalized_files = get_image_files(PATHS['normalized'])
-    remove_duplicates(normalized_files)
+    seen_hashes = {}
+    frame_index = 0
+    metadata = []
 
-    logger.info("Input handling finished successfully.")
+    for src in sorted(raw_dir.iterdir()):
+        if src.suffix.lower() not in SUPPORTED_IMAGE_EXTS:
+            continue
+
+        h = file_hash(src)
+        if h in seen_hashes:
+            logger.warning(f"Duplicate image skipped: {src.name}")
+            continue
+
+        dst_name = f"frame_{frame_index:06d}.jpg"
+        dst = images_dir / dst_name
+
+        shutil.copy2(src, dst)
+        seen_hashes[h] = dst_name
+
+        metadata.append({
+            "frame": dst_name,
+            "source": src.name,
+            "hash": h,
+        })
+
+        frame_index += 1
+
+    return metadata
+
+
+def ingest_video(raw_dir: Path, images_dir: Path, logger):
+    logger.info("Ingesting video files")
+
+    temp_dir = images_dir / "_ffmpeg_tmp"
+    temp_dir.mkdir(exist_ok=True)
+
+    metadata = []
+    frame_index = 0
+    seen_hashes = {}
+
+    for video in sorted(raw_dir.iterdir()):
+        if video.suffix.lower() not in SUPPORTED_VIDEO_EXTS:
+            continue
+
+        logger.info(f"Extracting frames from {video.name}")
+
+        cmd = [
+            "ffmpeg",
+            "-i", str(video),
+            "-vsync", "vfr",
+            "-q:v", "2",
+            str(temp_dir / "%06d.jpg"),
+        ]
+
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        for frame in sorted(temp_dir.iterdir()):
+            h = file_hash(frame)
+            if h in seen_hashes:
+                logger.debug(f"Duplicate frame skipped: {frame.name}")
+                frame.unlink()
+                continue
+
+            dst_name = f"frame_{frame_index:06d}.jpg"
+            dst = images_dir / dst_name
+            shutil.move(frame, dst)
+
+            seen_hashes[h] = dst_name
+            metadata.append({
+                "frame": dst_name,
+                "source": video.name,
+                "hash": h,
+            })
+
+            frame_index += 1
+
+        shutil.rmtree(temp_dir)
+        temp_dir.mkdir(exist_ok=True)
+
+    temp_dir.rmdir()
+    return metadata
+
+
+def main():
+    args = parse_args()
+
+    project_root = Path(args.project).resolve()
+    paths = ProjectPaths(project_root)
+    paths.ensure_all()
+
+    logger = get_logger("ingest", project_root)
+    logger.info("Starting input ingestion")
+
+    raw_dir = paths.raw
+    images_dir = paths.images
+
+    if images_dir.exists() and any(images_dir.iterdir()) and not args.force:
+        logger.warning("images/ already populated; use --force to re-ingest")
+        return
+
+    # Clear images dir if force
+    if args.force and images_dir.exists():
+        shutil.rmtree(images_dir)
+        images_dir.mkdir()
+
+    raw_files = list(raw_dir.iterdir())
+    if not raw_files:
+        logger.error("No input files found in raw/")
+        return
+
+    image_files = [f for f in raw_files if f.suffix.lower() in SUPPORTED_IMAGE_EXTS]
+    video_files = [f for f in raw_files if f.suffix.lower() in SUPPORTED_VIDEO_EXTS]
+
+    if image_files and video_files:
+        logger.error("Mixed image and video inputs are not supported")
+        return
+
+    if image_files:
+        metadata = ingest_images(raw_dir, images_dir, logger)
+        input_type = "images"
+    else:
+        metadata = ingest_video(raw_dir, images_dir, logger)
+        input_type = "video"
+
+    frames_json = paths.images / "frames.json"
+    with open(frames_json, "w", encoding="utf-8") as f:
+        json.dump({
+            "input_type": input_type,
+            "frame_count": len(metadata),
+            "frames": metadata,
+        }, f, indent=2)
+
+    logger.info(f"Ingested {len(metadata)} frames")
+    logger.info("Input ingestion complete")
+
 
 if __name__ == "__main__":
-    run_input_handler(frame_rate=5, use_ffmpeg=True)
+    main()

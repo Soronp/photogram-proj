@@ -1,46 +1,50 @@
+# utils/logger.py
 import logging
-import os
+from pathlib import Path
 from datetime import datetime
-from utils.config import PATHS
-
-_LOGGER = None
 
 
-def get_logger(name: str = "MARK2"):
+def get_logger(name: str, project_root: Path, level=logging.INFO) -> logging.Logger:
     """
-    Returns a singleton logger instance.
-    Safe to call from any module.
+    Centralized logger factory.
+
+    Creates:
+      logs/<name>.log
+
+    Features:
+    - Timestamped logs
+    - Console + file output
+    - Safe to call multiple times (no duplicate handlers)
     """
-    global _LOGGER
-    if _LOGGER is not None:
-        return _LOGGER
-
-    os.makedirs(PATHS["logs"], exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(PATHS["logs"], f"pipeline_{timestamp}.log")
+    logs_dir = project_root / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
+    logger.setLevel(level)
+
+    if logger.handlers:
+        return logger  # Prevent duplicate handlers
 
     formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(message)s"
+        "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
     # File handler
-    fh = logging.FileHandler(log_file, encoding="utf-8")
+    log_file = logs_dir / f"{name}.log"
+    fh = logging.FileHandler(log_file)
     fh.setFormatter(formatter)
+    fh.setLevel(level)
 
     # Console handler
     ch = logging.StreamHandler()
     ch.setFormatter(formatter)
+    ch.setLevel(level)
 
     logger.addHandler(fh)
     logger.addHandler(ch)
 
     logger.info("Logger initialized")
-    logger.info(f"Log file: {log_file}")
-
-    _LOGGER = logger
     return logger
+
+

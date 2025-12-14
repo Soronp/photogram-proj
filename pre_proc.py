@@ -1,129 +1,136 @@
 #!/usr/bin/env python3
 """
-Mark-2 Image Preprocessing Module (2K-safe)
-- Preserves aspect ratio
-- Scales images ONLY if max dimension exceeds 2000 px
-- Avoids geometric distortion (COLMAP-safe)
-- JSON-safe metadata
+preprocess_images.py
+
+MARK-2 Image Preprocessing Stage
+--------------------------------
+- Converts images to COLMAP-friendly JPEG
+- Applies EXIF orientation
+- Downsamples to a fixed max resolution
+- Renames images sequentially: img_000000.jpg, img_000001.jpg, ...
+- Produces canonical images_processed/ directory
+- Must run before sparse reconstruction
 """
 
-import os
-import cv2
-import json
-import time
-from utils.config import PATHS
+import argparse
+from pathlib import Path
+from PIL import Image, ImageOps
+
 from utils.logger import get_logger
+from utils.paths import ProjectPaths
+from utils.config import load_config
 
-logger = get_logger()
+# --------------------------------------------------
+# Configuration defaults
+# --------------------------------------------------
 
-METADATA_FILE = os.path.join(PATHS["processed"], "preprocessing_metadata.json")
-MAX_SIDE = 2000  # hard upper bound, NOT forced resolution
+DEFAULT_MAX_SIZE = 2000
+JPEG_QUALITY = 95
 
+# --------------------------------------------------
+# Helpers
+# --------------------------------------------------
 
-# ----------------------------------------------------------------------
-# Single-image preprocessing
-# ----------------------------------------------------------------------
-def preprocess_image(img_path, output_folder, adjust_contrast=True):
-    os.makedirs(output_folder, exist_ok=True)
+def is_image_file(path: Path) -> bool:
+    return path.suffix.lower() in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 
-    img = cv2.imread(img_path)
-    if img is None:
-        logger.warning(f"Failed to read image: {img_path}")
-        return None
+def preprocess_image(
+    src: Path,
+    dst: Path,
+    max_size: int,
+    logger
+):
+    """Preprocess a single image and save as a COLMAP-friendly JPEG."""
+    try:
+        img = Image.open(src)
+    except Exception as e:
+        logger.warning(f"Skipping unreadable image: {src.name} ({e})")
+        return False
 
-    h, w = img.shape[:2]
-    max_dim = max(w, h)
+    # Apply EXIF orientation
+    img = ImageOps.exif_transpose(img)
 
-    # --- Scale ONLY if image exceeds MAX_SIDE ---
-    scale_factor = 1.0
-    if max_dim > MAX_SIDE:
-        scale_factor = MAX_SIDE / max_dim
-        new_w = int(w * scale_factor)
-        new_h = int(h * scale_factor)
-        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-    else:
-        new_w, new_h = w, h
+    # Convert to RGB
+    if img.mode != "RGB":
+        img = img.convert("RGB")
 
-    # --- Optional mild contrast enhancement (COLMAP-safe) ---
-    alpha, beta = 1.0, 0
-    if adjust_contrast:
-        alpha = 1.1  # conservative contrast
-        beta = 5     # minimal brightness shift
-        img = cv2.convertScaleAbs(img, alpha=alpha, beta=beta)
+    # Downsample if necessary
+    w, h = img.size
+    scale = min(1.0, max_size / max(w, h))
+    if scale < 1.0:
+        new_size = (int(w * scale), int(h * scale))
+        img = img.resize(new_size, Image.LANCZOS)
+        logger.debug(f"{src.name}: resized {w}x{h} → {new_size[0]}x{new_size[1]}")
 
-    # Save image
-    filename = os.path.basename(img_path)
-    save_path = os.path.join(output_folder, filename)
-    cv2.imwrite(save_path, img)
+    # Save to destination
+    img.save(dst, format="JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True)
+    return True
 
-    logger.info(
-        f"Preprocessed {filename}: "
-        f"{w}x{h} → {new_w}x{new_h} (scale={round(scale_factor,3)})"
-    )
+# --------------------------------------------------
+# Main preprocessing logic
+# --------------------------------------------------
 
-    return {
-        "output_path": str(save_path),
-        "original_size": [w, h],
-        "processed_size": [new_w, new_h],
-        "scale_factor": scale_factor,
-        "contrast_alpha": alpha,
-        "brightness_beta": beta,
-    }
+def run_preprocessing(project_root: Path, force: bool):
+    paths = ProjectPaths(project_root)
+    config = load_config(project_root)
+    logger = get_logger("preprocess_images", project_root)
 
+    raw_dir = paths.raw
+    out_dir = paths.images_processed
+    max_size = int(config.get("preprocess_max_image_size", DEFAULT_MAX_SIZE))
 
-# ----------------------------------------------------------------------
-# Folder preprocessing
-# ----------------------------------------------------------------------
-def run_preprocessing(input_folder=None, output_folder=None, adjust_contrast=True):
-    start_time = time.time()
+    logger.info("Starting image preprocessing stage")
+    logger.info(f"Raw images: {raw_dir}")
+    logger.info(f"Output images: {out_dir}")
+    logger.info(f"Max image size: {max_size}px")
 
-    if input_folder is None:
-        input_folder = PATHS["filtered"]
-    if output_folder is None:
-        output_folder = os.path.join(PATHS["processed"], "images_preprocessed")
+    if not raw_dir.exists():
+        raise FileNotFoundError("raw/ directory does not exist")
 
-    os.makedirs(output_folder, exist_ok=True)
+    if out_dir.exists():
+        if force:
+            logger.warning("Removing existing images_processed (--force)")
+            for f in out_dir.iterdir():
+                f.unlink()
+        else:
+            logger.info("images_processed already exists — skipping")
+            return
 
-    images = [
-        f for f in os.listdir(input_folder)
-        if f.lower().endswith((".jpg", ".jpeg", ".png", ".tif", ".tiff"))
-    ]
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Found {len(images)} images in {input_folder}")
+    images = sorted(p for p in raw_dir.iterdir() if is_image_file(p))
+    if not images:
+        raise RuntimeError("No valid image files found in raw/")
 
-    metadata = {}
-    ok, failed = 0, 0
+    processed = 0
+    for i, img_path in enumerate(images):
+        dst_name = f"img_{i:06d}.jpg"
+        dst_path = out_dir / dst_name
+        ok = preprocess_image(
+            src=img_path,
+            dst=dst_path,
+            max_size=max_size,
+            logger=logger
+        )
+        if ok:
+            processed += 1
 
-    for name in images:
-        path = os.path.join(input_folder, name)
-        try:
-            result = preprocess_image(path, output_folder, adjust_contrast)
-            if result:
-                metadata[name] = result
-                ok += 1
-            else:
-                failed += 1
-        except Exception as e:
-            logger.error(f"Failed {name}: {e}")
-            failed += 1
+    if processed == 0:
+        raise RuntimeError("No images were successfully processed")
 
-    os.makedirs(PATHS["processed"], exist_ok=True)
-    with open(METADATA_FILE, "w") as f:
-        json.dump(metadata, f, indent=2)
+    logger.info(f"Preprocessing complete: {processed} images written")
+    logger.info("Canonical image naming and resolution frozen for pipeline")
 
-    logger.info(f"Metadata saved to {METADATA_FILE}")
-    logger.info(
-        f"Preprocessing complete: {ok}/{len(images)} OK, "
-        f"{failed} failed in {round(time.time() - start_time, 2)}s"
-    )
+# --------------------------------------------------
+# CLI
+# --------------------------------------------------
 
-    return str(output_folder)
+def main():
+    parser = argparse.ArgumentParser(description="MARK-2 Image Preprocessing")
+    parser.add_argument("project_root", type=Path)
+    parser.add_argument("--force", action="store_true", help="Overwrite existing processed images")
+    args = parser.parse_args()
+    run_preprocessing(args.project_root, args.force)
 
-
-# ----------------------------------------------------------------------
-# Standalone execution
-# ----------------------------------------------------------------------
 if __name__ == "__main__":
-    input_dir = input("Enter input folder:\n> ").strip('" ')
-    output_dir = input("Enter output folder:\n> ").strip('" ')
-    run_preprocessing(input_dir, output_dir, adjust_contrast=True)
+    main()

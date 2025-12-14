@@ -1,145 +1,173 @@
 #!/usr/bin/env python3
 """
-High-detail Dense Reconstruction (COLMAP 3.13 SAFE)
-- Uses valid CLI options only
-- Preserves maximum usable resolution
-- Stable on Windows
+dense_reconstruction.py
+
+MARK-2 Dense Reconstruction Stage
+---------------------------------
+- Uses sparse reconstruction + processed images
+- Runs COLMAP dense pipeline (undistort → PatchMatch → fusion)
+- Produces dense/fused.ply
+- Fully logged, deterministic, restart-safe
 """
 
-import os
-import subprocess
-import json
+import argparse
 import shutil
-from utils.config import PATHS, COLMAP_EXE
+import subprocess
+from pathlib import Path
+
 from utils.logger import get_logger
-
-logger = get_logger()
-CHECKPOINT_FILE = os.path.join(PATHS["logs"], "pipeline_checkpoint.json")
-
-
-# ------------------------------------------------------------------
-# Checkpoint helpers
-# ------------------------------------------------------------------
-
-def load_checkpoint():
-    if os.path.exists(CHECKPOINT_FILE):
-        with open(CHECKPOINT_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_checkpoint(step, output):
-    checkpoint = load_checkpoint()
-    checkpoint[step] = str(output)
-    os.makedirs(PATHS["logs"], exist_ok=True)
-    with open(CHECKPOINT_FILE, "w") as f:
-        json.dump(checkpoint, f, indent=2)
-    logger.info(f"Checkpoint saved: {step}")
+from utils.paths import ProjectPaths
+from utils.config import load_config, COLMAP_EXE
 
 
 # ------------------------------------------------------------------
 # Command runner
 # ------------------------------------------------------------------
-
-def run_command(cmd, label):
+def run_command(cmd, logger, label):
     cmd = [str(c) for c in cmd]
-    logger.info(f"[RUN] {label}: {' '.join(cmd)}")
-    result = subprocess.run(
-        cmd,
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT
-    )
-    logger.info(result.stdout)
-    return result
+    logger.info(f"[RUN] {label}")
+    logger.info(" ".join(cmd))
 
-
-# ------------------------------------------------------------------
-# Sparse model finder
-# ------------------------------------------------------------------
-
-def find_sparse_model(base):
-    for root, dirs, _ in os.walk(base):
-        if "0" in dirs:
-            model = os.path.join(root, "0")
-            required = ["cameras.bin", "images.bin", "points3D.bin"]
-            if all(os.path.exists(os.path.join(model, f)) for f in required):
-                return model
-    return None
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        logger.info(result.stdout)
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Command failed ({label}): {e}")
+        logger.error(e.stdout)
+        raise RuntimeError(f"{label} failed")
 
 
 # ------------------------------------------------------------------
 # Dense reconstruction
 # ------------------------------------------------------------------
+def run_dense_reconstruction(project_root: Path, force: bool):
+    paths = ProjectPaths(project_root)
+    config = load_config(project_root)
+    logger = get_logger("dense_reconstruction", project_root)
 
-def run_dense_colmap():
-    image_dir = os.path.join(PATHS["processed"], "images_preprocessed")
-    sparse_root = os.path.join(PATHS["sparse"], "model")
-    dense_ws = PATHS["dense"]
+    images_dir = paths.images_processed  # Correct folder
+    sparse_root = paths.sparse
+    dense_root = paths.dense
 
-    sparse_model = find_sparse_model(sparse_root)
-    if sparse_model is None:
-        raise RuntimeError("Sparse model not found for dense reconstruction")
+    logger.info("Starting dense reconstruction stage")
+    logger.info(f"Images: {images_dir}")
+    logger.info(f"Sparse model root: {sparse_root}")
+    logger.info(f"Dense output root: {dense_root}")
 
-    if os.path.exists(dense_ws):
-        shutil.rmtree(dense_ws)
-    os.makedirs(dense_ws, exist_ok=True)
+    if not images_dir.exists() or not any(images_dir.iterdir()):
+        raise FileNotFoundError(f"No images found in {images_dir}")
+
+    # Locate sparse model (expects sparse/0/)
+    model_dir = next(
+        (d for d in sparse_root.iterdir() if d.is_dir() and (d / "cameras.bin").exists()),
+        None
+    )
+    if model_dir is None:
+        raise RuntimeError("No valid sparse model found for dense reconstruction")
+
+    logger.info(f"Using sparse model: {model_dir}")
+
+    # Prepare dense directory
+    if dense_root.exists():
+        if force:
+            logger.warning("Removing existing dense directory (--force)")
+            shutil.rmtree(dense_root)
+        else:
+            logger.info("Dense directory already exists — skipping stage")
+            return
+
+    dense_root.mkdir(parents=True, exist_ok=True)
 
     # --------------------------------------------------
-    # 1. Image Undistortion (HIGH DETAIL, SAFE)
+    # 1. Image Undistortion (COLMAP format)
     # --------------------------------------------------
-    run_command([
-        COLMAP_EXE, "image_undistorter",
-        "--image_path", image_dir,
-        "--input_path", sparse_model,
-        "--output_path", dense_ws,
-        "--output_type", "COLMAP",
-        "--max_image_size", "2800"
-    ], "Image Undistortion (High Detail)")
+    max_size = int(config.get("dense_max_image_size", 2800))
+
+    run_command(
+        [
+            COLMAP_EXE,
+            "image_undistorter",
+            "--image_path", str(images_dir),
+            "--input_path", str(model_dir),
+            "--output_path", str(dense_root),
+            "--output_type", "COLMAP",
+            "--max_image_size", str(max_size)
+        ],
+        logger,
+        "Image Undistortion"
+    )
+
+    undistorted_images = dense_root / "images"
+    if not undistorted_images.exists() or not any(undistorted_images.iterdir()):
+        raise RuntimeError("No undistorted images produced")
+
+    logger.info(f"Undistorted images ready: {len(list(undistorted_images.iterdir()))} images")
 
     # --------------------------------------------------
-    # 2. PatchMatch Stereo (GEOMETRIC CONSISTENCY)
+    # 2. PatchMatch Stereo (geometric consistency)
     # --------------------------------------------------
-    run_command([
-        COLMAP_EXE, "patch_match_stereo",
-        "--workspace_path", dense_ws,
-        "--workspace_format", "COLMAP",
-        "--PatchMatchStereo.geom_consistency", "1"
-    ], "PatchMatch Stereo")
+    run_command(
+        [
+            COLMAP_EXE,
+            "patch_match_stereo",
+            "--workspace_path", str(dense_root),
+            "--workspace_format", "COLMAP",
+            "--PatchMatchStereo.geom_consistency", "1",
+            "--PatchMatchStereo.filter", "1",
+            "--PatchMatchStereo.window_radius", "5",
+            "--PatchMatchStereo.num_samples", "15",
+            "--PatchMatchStereo.num_iterations", "3"
+        ],
+        logger,
+        "PatchMatch Stereo"
+    )
+
+    depth_maps = dense_root / "stereo" / "depth_maps"
+    if not depth_maps.exists() or not any(depth_maps.iterdir()):
+        raise RuntimeError("PatchMatch produced no depth maps")
 
     # --------------------------------------------------
-    # 3. Stereo Fusion (MAX DENSITY)
+    # 3. Stereo Fusion
     # --------------------------------------------------
-    fused_ply = os.path.join(dense_ws, "fused.ply")
-    run_command([
-        COLMAP_EXE, "stereo_fusion",
-        "--workspace_path", dense_ws,
-        "--workspace_format", "COLMAP",
-        "--input_type", "geometric",
-        "--output_path", fused_ply
-    ], "Stereo Fusion")
+    fused_ply = dense_root / "fused.ply"
 
-    if not os.path.exists(fused_ply):
-        raise RuntimeError("Dense reconstruction failed: fused.ply missing")
+    run_command(
+        [
+            COLMAP_EXE,
+            "stereo_fusion",
+            "--workspace_path", str(dense_root),
+            "--workspace_format", "COLMAP",
+            "--input_type", "geometric",
+            "--output_path", str(fused_ply)
+        ],
+        logger,
+        "Stereo Fusion"
+    )
 
-    logger.info(f"Dense reconstruction completed: {fused_ply}")
-    return fused_ply
+    if not fused_ply.exists() or fused_ply.stat().st_size == 0:
+        raise RuntimeError("Fusion failed: fused.ply is empty")
+
+    logger.info("Dense reconstruction completed successfully")
+    logger.info(f"Dense point cloud: {fused_ply}")
 
 
 # ------------------------------------------------------------------
-# Orchestrator
+# CLI
 # ------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(description="MARK-2 Dense Reconstruction")
+    parser.add_argument("project_root", type=Path)
+    parser.add_argument("--force", action="store_true", help="Overwrite existing dense output")
+    args = parser.parse_args()
 
-def run_dense_reconstruction():
-    cp = load_checkpoint()
-    if "dense" in cp:
-        logger.info("Dense stage already completed. Skipping.")
-        return cp["dense"]
-
-    out = run_dense_colmap()
-    save_checkpoint("dense", out)
-    return out
+    run_dense_reconstruction(args.project_root, args.force)
 
 
 if __name__ == "__main__":
-    run_dense_reconstruction()
+    main()
