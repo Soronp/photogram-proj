@@ -2,7 +2,10 @@
 """
 image_filter.py
 
-Pre-SfM image filtering stage.
+Pre-SfM image filtering stage (MARK-2 compliant).
+
+Stage position:
+    input  -> image_filter -> pre_processing
 
 Responsibilities:
 - Remove near-duplicate images (content-based)
@@ -10,14 +13,13 @@ Responsibilities:
 - Preserve deterministic ordering
 - Produce diagnostics for coverage and filtering
 
-This script MUST:
-- Read from images/
-- Write to images_filtered/
-- Never modify images/
-- Be safe to re-run
+Reads:
+- paths.images_processed
+
+Writes:
+- paths.images_filtered
 """
 
-import argparse
 import shutil
 import json
 import cv2
@@ -30,12 +32,9 @@ from utils.paths import ProjectPaths
 from utils.config import load_config
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Filter redundant / bad images")
-    parser.add_argument("--project", required=True, help="Path to project root")
-    parser.add_argument("--force", action="store_true", help="Re-run filtering")
-    return parser.parse_args()
-
+# -------------------------------------------------
+# Image metrics
+# -------------------------------------------------
 
 def image_hash(img: np.ndarray) -> str:
     """Perceptual hash using downsampled grayscale image."""
@@ -50,29 +49,36 @@ def blur_score(img: np.ndarray) -> float:
     return cv2.Laplacian(gray, cv2.CV_64F).var()
 
 
-def main():
-    args = parse_args()
+# -------------------------------------------------
+# Pipeline entrypoint
+# -------------------------------------------------
 
-    project_root = Path(args.project).resolve()
+def run(project_root: Path, force: bool):
     paths = ProjectPaths(project_root)
     paths.ensure_all()
 
     logger = get_logger("image_filter", project_root)
     config = load_config(project_root)
 
-    images_dir = paths.images_processed
+    src_dir = paths.images
     out_dir = paths.images_filtered
 
-    if out_dir.exists() and any(out_dir.iterdir()) and not args.force:
+    if not src_dir.exists():
+        raise RuntimeError("images_processed does not exist — input stage incomplete")
+
+    # Skip logic
+    if out_dir.exists() and any(out_dir.iterdir()) and not force:
         logger.info("images_filtered already exists; skipping")
         return
 
-    if args.force and out_dir.exists():
+    # Force clean
+    if force and out_dir.exists():
+        logger.info("Force enabled — clearing images_filtered")
         shutil.rmtree(out_dir)
-    out_dir.mkdir(exist_ok=True)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     blur_thresh = config.get("image_filter", {}).get("blur_threshold", 0.0)
-
     logger.info(f"Blur threshold: {blur_thresh}")
 
     seen_hashes = {}
@@ -80,22 +86,32 @@ def main():
     dropped = []
 
     frame_idx = 0
+    images = sorted(src_dir.glob("*.jpg"))
 
-    for img_path in sorted(images_dir.glob("*.jpg")):
+    logger.info(f"Filtering {len(images)} images")
+
+    for img_path in images:
         img = cv2.imread(str(img_path))
         if img is None:
-            logger.warning(f"Unreadable image skipped: {img_path.name}")
             dropped.append({"file": img_path.name, "reason": "unreadable"})
             continue
 
         bscore = blur_score(img)
         if bscore < blur_thresh:
-            dropped.append({"file": img_path.name, "reason": "blur", "score": bscore})
+            dropped.append({
+                "file": img_path.name,
+                "reason": "blur",
+                "score": float(bscore),
+            })
             continue
 
         h = image_hash(img)
         if h in seen_hashes:
-            dropped.append({"file": img_path.name, "reason": "duplicate"})
+            dropped.append({
+                "file": img_path.name,
+                "reason": "duplicate",
+                "duplicate_of": seen_hashes[h],
+            })
             continue
 
         dst_name = f"img_{frame_idx:06d}.jpg"
@@ -105,13 +121,13 @@ def main():
         kept.append({
             "source": img_path.name,
             "output": dst_name,
-            "blur_score": bscore,
+            "blur_score": float(bscore),
         })
 
         frame_idx += 1
 
     report = {
-        "input_count": len(list(images_dir.glob("*.jpg"))),
+        "input_count": len(images),
         "kept_count": len(kept),
         "dropped_count": len(dropped),
         "blur_threshold": blur_thresh,
@@ -123,8 +139,6 @@ def main():
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
-    logger.info(f"Filtering complete: kept {len(kept)} / dropped {len(dropped)}")
-
-
-if __name__ == "__main__":
-    main()
+    logger.info(
+        f"Filtering complete: kept {len(kept)} / dropped {len(dropped)}"
+    )
