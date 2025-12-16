@@ -3,40 +3,49 @@ from pathlib import Path
 
 class ProjectPaths:
     """
-    Central registry for all project paths.
+    Central registry for all MARK-2 project paths.
 
-    No script should construct paths manually.
+    No stage should construct paths manually.
+    This class is UI-safe and resume-safe.
     """
 
     def __init__(self, project_root: Path):
-        self.root = project_root
+        self.root = project_root.resolve()
 
-        # Core
-        self.raw = project_root / "raw"
-        self.images = project_root / "images"
-        self.images_filtered = project_root / "images_filtered"
+        # -----------------------------
+        # Input & preprocessing
+        # -----------------------------
+        self.raw = self.root / "raw"                       # ingested data
+        self.images = self.root / "images"                 # extracted frames / copied images
+        self.images_filtered = self.root / "images_filtered"
         self.images_processed = self.root / "images_processed"
 
+        # -----------------------------
         # Reconstruction
-        self.database = project_root / "database"
-        self.sparse = project_root / "sparse"
-        self.dense = project_root / "dense"
+        # -----------------------------
+        self.database = self.root / "database"
+        self.sparse = self.root / "sparse"
+        self.dense = self.root / "dense"
 
+        # -----------------------------
         # Outputs
-        self.mesh = project_root / "mesh"
-        self.textures = project_root / "textures"
-        self.evaluation = project_root / "evaluation"
-        self.visualization = project_root / "visualization"
+        # -----------------------------
+        self.mesh = self.root / "mesh"
+        self.textures = self.root / "textures"
+        self.evaluation = self.root / "evaluation"
+        self.visualization = self.root / "visualization"
 
-
-        # Logs
-        self.logs = project_root / "logs"
+        # -----------------------------
+        # Metadata & logs
+        # -----------------------------
+        self.logs = self.root / "logs"
+        self.runs = self.root / "runs"   # run manifests (future-safe)
 
     def ensure_all(self):
-        """Create all directories if missing."""
-        for path in vars(self).values():
-            if isinstance(path, Path):
-                path.mkdir(parents=True, exist_ok=True)
+        """Create all required directories."""
+        for value in vars(self).values():
+            if isinstance(value, Path):
+                value.mkdir(parents=True, exist_ok=True)
 
     def __repr__(self):
         return f"ProjectPaths(root={self.root})"

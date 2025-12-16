@@ -5,7 +5,7 @@ image_filter.py
 Pre-SfM image filtering stage (MARK-2 compliant).
 
 Stage position:
-    input  -> image_filter -> pre_processing
+    input -> image_analyzer -> image_filter -> pre_processing
 
 Responsibilities:
 - Remove near-duplicate images (content-based)
@@ -14,10 +14,11 @@ Responsibilities:
 - Produce diagnostics for coverage and filtering
 
 Reads:
-- paths.images_processed
+- paths.raw (output of input.py)
 
 Writes:
 - paths.images_filtered
+- filter_report.json
 """
 
 import shutil
@@ -29,7 +30,10 @@ from pathlib import Path
 
 from utils.logger import get_logger
 from utils.paths import ProjectPaths
-from utils.config import load_config
+from config_manager import create_runtime_config, validate_config
+
+
+SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
 
 
 # -------------------------------------------------
@@ -46,49 +50,56 @@ def image_hash(img: np.ndarray) -> str:
 def blur_score(img: np.ndarray) -> float:
     """Variance of Laplacian (higher = sharper)."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    return cv2.Laplacian(gray, cv2.CV_64F).var()
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
 # -------------------------------------------------
 # Pipeline entrypoint
 # -------------------------------------------------
 
-def run(project_root: Path, force: bool):
+def run(project_root: Path, force: bool = False):
     paths = ProjectPaths(project_root)
     paths.ensure_all()
 
     logger = get_logger("image_filter", project_root)
-    config = load_config(project_root)
 
-    src_dir = paths.images
+    # Load runtime config (image_analyzer already populated hints)
+    config = create_runtime_config(project_root)
+    if not validate_config(config, logger):
+        logger.warning("Config validation failed — proceeding with defaults")
+
+    src_dir = paths.raw
     out_dir = paths.images_filtered
 
-    if not src_dir.exists():
-        raise RuntimeError("images_processed does not exist — input stage incomplete")
+    if not src_dir.exists() or not any(src_dir.iterdir()):
+        raise RuntimeError("raw/ is empty — input stage must run first")
 
     # Skip logic
     if out_dir.exists() and any(out_dir.iterdir()) and not force:
-        logger.info("images_filtered already exists; skipping")
+        logger.info("images_filtered already exists; skipping stage")
         return
 
-    # Force clean
+    # Force cleanup
     if force and out_dir.exists():
-        logger.info("Force enabled — clearing images_filtered")
+        logger.warning("Force enabled — clearing images_filtered")
         shutil.rmtree(out_dir)
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    blur_thresh = config.get("image_filter", {}).get("blur_threshold", 0.0)
-    logger.info(f"Blur threshold: {blur_thresh}")
+    blur_thresh = config.get("preprocessing", {}).get("blur_threshold", 0.0)
+    logger.info(f"Using blur threshold: {blur_thresh}")
+
+    images = sorted(
+        p for p in src_dir.iterdir()
+        if p.suffix.lower() in SUPPORTED_IMAGE_EXTS
+    )
+
+    logger.info(f"Filtering {len(images)} raw images")
 
     seen_hashes = {}
     kept = []
     dropped = []
-
     frame_idx = 0
-    images = sorted(src_dir.glob("*.jpg"))
-
-    logger.info(f"Filtering {len(images)} images")
 
     for img_path in images:
         img = cv2.imread(str(img_path))
@@ -142,3 +153,4 @@ def run(project_root: Path, force: bool):
     logger.info(
         f"Filtering complete: kept {len(kept)} / dropped {len(dropped)}"
     )
+    logger.info(f"Filter report saved: {report_path}")

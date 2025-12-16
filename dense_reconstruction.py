@@ -2,34 +2,39 @@
 """
 dense_reconstruction.py
 
-MARK-2 Dense Reconstruction (Hybrid-Aware)
-------------------------------------------
-- Consumes GLOMAP or COLMAP sparse models
-- Dynamically adapts COLMAP MVS parameters
-- Streams stdout (no silent hangs)
+MARK-2 Dense Reconstruction (OpenMVS-first)
+-------------------------------------------
+- Primary backend: OpenMVS
+- Fallback backend: COLMAP MVS
 - Deterministic, restart-safe
+- Guarantees dense/fused.ply output
 """
 
 import argparse
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 from utils.logger import get_logger
 from utils.paths import ProjectPaths
 from utils.config import load_config, COLMAP_EXE
 
 
-# ------------------------------------------------------------------
-# Streaming command runner (parity-safe)
-# ------------------------------------------------------------------
+# --------------------------------------------------
+# Utility
+# --------------------------------------------------
+
+def command_exists(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
+
+
 def run_command(cmd, logger, label):
     cmd = [str(c) for c in cmd]
     logger.info(f"[RUN] {label}")
     logger.info(" ".join(cmd))
 
-    process = subprocess.Popen(
+    proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -37,111 +42,124 @@ def run_command(cmd, logger, label):
         bufsize=1,
     )
 
-    for line in process.stdout:
+    for line in proc.stdout:
         logger.info(line.rstrip())
 
-    process.wait()
-    if process.returncode != 0:
+    proc.wait()
+    if proc.returncode != 0:
         raise RuntimeError(f"{label} failed")
 
 
-# ------------------------------------------------------------------
-# Sparse model discovery (GLOMAP/COLMAP agnostic)
-# ------------------------------------------------------------------
+# --------------------------------------------------
+# Sparse model discovery
+# --------------------------------------------------
+
 def find_sparse_model(sparse_root: Path) -> Optional[Path]:
     required = {"cameras.bin", "images.bin", "points3D.bin"}
-
     for d in sorted(sparse_root.iterdir()):
         if d.is_dir() and required.issubset({f.name for f in d.iterdir()}):
             return d
     return None
 
 
-# ------------------------------------------------------------------
-# Sparse analysis (hybrid-aware, CLI-safe)
-# ------------------------------------------------------------------
-def analyze_sparse_model(model_dir: Path, images_dir: Path, logger) -> Dict:
-    image_exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
-    total_images = sum(1 for f in images_dir.iterdir() if f.suffix.lower() in image_exts)
+# --------------------------------------------------
+# OpenMVS backend
+# --------------------------------------------------
 
-    images_bin = model_dir / "images.bin"
-    points_bin = model_dir / "points3D.bin"
+def run_openmvs(
+    model_dir: Path,
+    images_dir: Path,
+    dense_root: Path,
+    fused_ply: Path,
+    logger,
+):
+    logger.info("Using OpenMVS backend")
 
-    reconstructed = images_bin.stat().st_size // 64 if images_bin.exists() else 0
-    points = points_bin.stat().st_size // 24 if points_bin.exists() else 0
+    openmvs_dir = dense_root / "openmvs"
+    openmvs_dir.mkdir(parents=True, exist_ok=True)
 
-    coverage = (reconstructed / total_images * 100) if total_images else 0
+    scene_mvs = openmvs_dir / "scene.mvs"
+    dense_mvs = openmvs_dir / "dense.mvs"
 
-    if coverage >= 70 and points > 15000:
-        quality = "good"
-    elif coverage >= 40:
-        quality = "fair"
-    else:
-        quality = "poor"
+    # Step 1: InterfaceCOLMAP
+    run_command([
+        "InterfaceCOLMAP",
+        "--input-path", model_dir,
+        "--image-path", images_dir,
+        "--output-file", scene_mvs,
+    ], logger, "OpenMVS InterfaceCOLMAP")
 
-    logger.info("Sparse Analysis:")
-    logger.info(f"  Images used  : {reconstructed}/{total_images}")
-    logger.info(f"  Points      : {points}")
-    logger.info(f"  Coverage    : {coverage:.1f}%")
-    logger.info(f"  Quality     : {quality}")
+    # Step 2: DensifyPointCloud
+    run_command([
+        "DensifyPointCloud",
+        scene_mvs,
+        "--output-file", dense_mvs,
+        "--resolution-level", "2",
+        "--number-views", "8",
+    ], logger, "OpenMVS DensifyPointCloud")
 
-    return {
-        "quality": quality,
-        "coverage": coverage,
-        "points": points,
-    }
+    # Step 3: Export dense point cloud
+    run_command([
+        "ExportPointCloud",
+        dense_mvs,
+        "--output-file", fused_ply,
+    ], logger, "OpenMVS ExportPointCloud")
 
-
-# ------------------------------------------------------------------
-# Dynamic dense parameter selection
-# ------------------------------------------------------------------
-def select_dense_parameters(analysis: Dict, logger) -> Dict:
-    q = analysis["quality"]
-
-    if q == "poor":
-        params = {
-            "max_image_size": "1400",
-            "patchmatch": [
-                "--PatchMatchStereo.geom_consistency", "false",
-                "--PatchMatchStereo.filter", "true",
-                "--PatchMatchStereo.num_iterations", "2",
-                "--PatchMatchStereo.num_samples", "10",
-                "--PatchMatchStereo.cache_size", "32",
-            ],
-        }
-    elif q == "fair":
-        params = {
-            "max_image_size": "2000",
-            "patchmatch": [
-                "--PatchMatchStereo.geom_consistency", "true",
-                "--PatchMatchStereo.filter", "true",
-                "--PatchMatchStereo.num_iterations", "3",
-                "--PatchMatchStereo.num_samples", "15",
-                "--PatchMatchStereo.cache_size", "32",
-            ],
-        }
-    else:
-        params = {
-            "max_image_size": "2400",
-            "patchmatch": [
-                "--PatchMatchStereo.geom_consistency", "true",
-                "--PatchMatchStereo.filter", "true",
-                "--PatchMatchStereo.num_iterations", "5",
-                "--PatchMatchStereo.num_samples", "25",
-                "--PatchMatchStereo.cache_size", "32",
-            ],
-        }
-
-    logger.info(f"Dense preset selected: {q}")
-    return params
+    if not fused_ply.exists() or fused_ply.stat().st_size < 100_000:
+        raise RuntimeError("OpenMVS output invalid")
 
 
-# ------------------------------------------------------------------
-# Execution
-# ------------------------------------------------------------------
+# --------------------------------------------------
+# COLMAP fallback backend
+# --------------------------------------------------
+
+def run_colmap_mvs(
+    model_dir: Path,
+    images_dir: Path,
+    dense_root: Path,
+    fused_ply: Path,
+    logger,
+):
+    logger.warning("Falling back to COLMAP dense reconstruction")
+
+    # Undistort
+    run_command([
+        COLMAP_EXE, "image_undistorter",
+        "--image_path", images_dir,
+        "--input_path", model_dir,
+        "--output_path", dense_root,
+        "--output_type", "COLMAP",
+        "--max_image_size", "2000",
+    ], logger, "COLMAP Image Undistortion")
+
+    # PatchMatch
+    run_command([
+        COLMAP_EXE, "patch_match_stereo",
+        "--workspace_path", dense_root,
+        "--workspace_format", "COLMAP",
+        "--PatchMatchStereo.geom_consistency", "true",
+    ], logger, "COLMAP PatchMatchStereo")
+
+    # Fusion
+    run_command([
+        COLMAP_EXE, "stereo_fusion",
+        "--workspace_path", dense_root,
+        "--workspace_format", "COLMAP",
+        "--input_type", "geometric",
+        "--output_path", fused_ply,
+    ], logger, "COLMAP StereoFusion")
+
+    if not fused_ply.exists() or fused_ply.stat().st_size < 100_000:
+        raise RuntimeError("COLMAP dense output invalid")
+
+
+# --------------------------------------------------
+# Main dense stage
+# --------------------------------------------------
+
 def run_dense_reconstruction(project_root: Path, force: bool):
-    paths = ProjectPaths(project_root)
     load_config(project_root)
+    paths = ProjectPaths(project_root)
     logger = get_logger("dense_reconstruction", project_root)
 
     images_dir = paths.images_processed
@@ -159,50 +177,33 @@ def run_dense_reconstruction(project_root: Path, force: bool):
 
     if dense_root.exists():
         shutil.rmtree(dense_root)
-    dense_root.mkdir(parents=True)
+    dense_root.mkdir(parents=True, exist_ok=True)
 
-    analysis = analyze_sparse_model(model_dir, images_dir, logger)
-    params = select_dense_parameters(analysis, logger)
+    openmvs_available = (
+        command_exists("InterfaceCOLMAP")
+        and command_exists("DensifyPointCloud")
+        and command_exists("ExportPointCloud")
+    )
 
-    # Undistortion
-    run_command([
-        COLMAP_EXE, "image_undistorter",
-        "--image_path", images_dir,
-        "--input_path", model_dir,
-        "--output_path", dense_root,
-        "--output_type", "COLMAP",
-        "--max_image_size", params["max_image_size"],
-    ], logger, "Image Undistortion")
+    if openmvs_available:
+        try:
+            run_openmvs(model_dir, images_dir, dense_root, fused_ply, logger)
+            logger.info("Dense reconstruction completed with OpenMVS")
+            return
+        except Exception as e:
+            logger.error(f"OpenMVS failed: {e}")
 
-    # PatchMatch
-    cmd = [
-        COLMAP_EXE, "patch_match_stereo",
-        "--workspace_path", dense_root,
-        "--workspace_format", "COLMAP",
-    ] + params["patchmatch"]
-
-    run_command(cmd, logger, "PatchMatch Stereo")
-
-    # Fusion
-    run_command([
-        COLMAP_EXE, "stereo_fusion",
-        "--workspace_path", dense_root,
-        "--workspace_format", "COLMAP",
-        "--input_type", "geometric",
-        "--output_path", fused_ply,
-    ], logger, "Stereo Fusion")
-
-    if not fused_ply.exists() or fused_ply.stat().st_size < 100_000:
-        raise RuntimeError("Dense reconstruction failed")
-
-    logger.info("Dense reconstruction completed successfully")
+    # Fallback
+    run_colmap_mvs(model_dir, images_dir, dense_root, fused_ply, logger)
+    logger.info("Dense reconstruction completed with COLMAP fallback")
 
 
-# ------------------------------------------------------------------
+# --------------------------------------------------
 # CLI
-# ------------------------------------------------------------------
+# --------------------------------------------------
+
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="MARK-2 Dense Reconstruction")
     parser.add_argument("project_root", type=Path)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()

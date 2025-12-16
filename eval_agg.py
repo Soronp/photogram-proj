@@ -8,6 +8,7 @@ MARK-2 Evaluation Aggregation Stage
 - Handles missing metrics gracefully
 - Produces unified JSON and CSV summaries
 - Deterministic and restart-safe
+- Pipeline-compatible: run_evaluation_aggregation(project_root, force)
 """
 
 import argparse
@@ -24,7 +25,7 @@ from utils.config import load_config
 # Aggregation logic
 # ------------------------------------------------------------------
 
-def run_evaluation_aggregation(project_root: Path):
+def run_evaluation_aggregation(project_root: Path, force: bool = False):
     paths = ProjectPaths(project_root)
     _ = load_config(project_root)
     logger = get_logger("evaluation_aggregator", project_root)
@@ -117,9 +118,10 @@ def run_evaluation_aggregation(project_root: Path):
 def main():
     parser = argparse.ArgumentParser(description="MARK-2 Evaluation Aggregator")
     parser.add_argument("project_root", type=Path)
-
+    parser.add_argument("--force", action="store_true", help="Force re-aggregation")
     args = parser.parse_args()
-    run_evaluation_aggregation(args.project_root)
+
+    run_evaluation_aggregation(args.project_root, args.force)
 
 
 if __name__ == "__main__":

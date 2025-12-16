@@ -8,6 +8,7 @@ MARK-2 Visualization Stage
 - Does NOT modify any upstream data
 - Deterministic and restart-safe
 - Outputs PNG renders only
+- Pipeline-compatible: run_visualization(project_root, force)
 """
 
 import argparse
@@ -27,7 +28,7 @@ from utils.config import load_config
 # Visualization
 # ------------------------------------------------------------------
 
-def run_visualization(project_root: Path):
+def run_visualization(project_root: Path, force: bool = False):
     paths = ProjectPaths(project_root)
     _ = load_config(project_root)
     logger = get_logger("visualization", project_root)
@@ -58,7 +59,6 @@ def run_visualization(project_root: Path):
     # --------------------------------------------------
 
     logger.info("Rendering mesh overview")
-
     vis = o3d.visualization.Visualizer()
     vis.create_window(visible=False)
     vis.add_geometry(mesh)
@@ -68,7 +68,6 @@ def run_visualization(project_root: Path):
     img_path = vis_dir / "mesh_overview.png"
     vis.capture_screen_image(str(img_path))
     vis.destroy_window()
-
     logger.info(f"Saved mesh overview: {img_path}")
 
     # --------------------------------------------------
@@ -76,7 +75,6 @@ def run_visualization(project_root: Path):
     # --------------------------------------------------
 
     logger.info("Rendering bounding box")
-
     bbox = mesh.get_axis_aligned_bounding_box()
     bbox.color = (1, 0, 0)
 
@@ -90,7 +88,6 @@ def run_visualization(project_root: Path):
     bbox_img = vis_dir / "mesh_bbox.png"
     vis.capture_screen_image(str(bbox_img))
     vis.destroy_window()
-
     logger.info(f"Saved bounding box render: {bbox_img}")
 
     # --------------------------------------------------
@@ -98,10 +95,8 @@ def run_visualization(project_root: Path):
     # --------------------------------------------------
 
     logger.info("Generating triangle density visualization")
-
     tris = np.asarray(mesh.triangles)
     verts = np.asarray(mesh.vertices)
-
     tri_centers = verts[tris].mean(axis=1)
     z_vals = tri_centers[:, 2]
 
@@ -115,7 +110,6 @@ def run_visualization(project_root: Path):
     plt.tight_layout()
     plt.savefig(density_img, dpi=200)
     plt.close()
-
     logger.info(f"Saved triangle density plot: {density_img}")
 
     # --------------------------------------------------
@@ -124,7 +118,6 @@ def run_visualization(project_root: Path):
 
     if eval_summary.exists():
         logger.info("Rendering metrics summary panel")
-
         with open(eval_summary, "r", encoding="utf-8") as f:
             summary = json.load(f)
 
@@ -144,7 +137,6 @@ def run_visualization(project_root: Path):
         metrics_img = vis_dir / "metrics_summary.png"
         plt.savefig(metrics_img, dpi=200, bbox_inches="tight")
         plt.close()
-
         logger.info(f"Saved metrics summary panel: {metrics_img}")
     else:
         logger.warning("Evaluation summary not found — skipping metrics panel")
@@ -159,9 +151,10 @@ def run_visualization(project_root: Path):
 def main():
     parser = argparse.ArgumentParser(description="MARK-2 Visualization")
     parser.add_argument("project_root", type=Path)
-
+    parser.add_argument("--force", action="store_true", help="Force re-rendering")
     args = parser.parse_args()
-    run_visualization(args.project_root)
+
+    run_visualization(args.project_root, args.force)
 
 
 if __name__ == "__main__":
