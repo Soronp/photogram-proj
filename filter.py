@@ -1,156 +1,111 @@
 #!/usr/bin/env python3
 """
-image_filter.py
-
-Pre-SfM image filtering stage (MARK-2 compliant).
-
-Stage position:
-    input -> image_analyzer -> image_filter -> pre_processing
+image_filter.py (MARK-2 SfM-SAFE)
 
 Responsibilities:
-- Remove near-duplicate images (content-based)
-- Detect and drop blurry / low-information images
-- Preserve deterministic ordering
-- Produce diagnostics for coverage and filtering
-
-Reads:
-- paths.raw (output of input.py)
-
-Writes:
-- paths.images_filtered
-- filter_report.json
+- Drop only images that actively damage sparse reconstruction
+- Never reason about overlap, angles, or perceptual similarity
+- Never reduce dataset size meaningfully
+- Guarantee geometric continuity
 """
 
 import shutil
 import json
 import cv2
-import numpy as np
-import hashlib
 from pathlib import Path
+from tqdm import tqdm
 
 from utils.logger import get_logger
 from utils.paths import ProjectPaths
-from config_manager import create_runtime_config, validate_config
+
+SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
 
 
-SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
-
-
-# -------------------------------------------------
-# Image metrics
-# -------------------------------------------------
-
-def image_hash(img: np.ndarray) -> str:
-    """Perceptual hash using downsampled grayscale image."""
-    small = cv2.resize(img, (32, 32))
-    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    return hashlib.sha1(gray.tobytes()).hexdigest()
-
-
-def blur_score(img: np.ndarray) -> float:
-    """Variance of Laplacian (higher = sharper)."""
+# -------------------- METRICS --------------------
+def keypoint_count(img):
+    """
+    Feature existence sanity check.
+    ORB is fast and sufficient for rejection only.
+    """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    orb = cv2.ORB_create(nfeatures=500)
+    kp = orb.detect(gray, None)
+    return len(kp)
 
 
-# -------------------------------------------------
-# Pipeline entrypoint
-# -------------------------------------------------
-
-def run(project_root: Path, force: bool = False):
+# -------------------- PIPELINE --------------------
+def run(project_root: Path, force=False):
     paths = ProjectPaths(project_root)
     paths.ensure_all()
-
     logger = get_logger("image_filter", project_root)
 
-    # Load runtime config (image_analyzer already populated hints)
-    config = create_runtime_config(project_root)
-    if not validate_config(config, logger):
-        logger.warning("Config validation failed — proceeding with defaults")
+    src = paths.raw
+    dst = paths.images_filtered
 
-    src_dir = paths.raw
-    out_dir = paths.images_filtered
+    if not src.exists():
+        raise RuntimeError("raw/ missing")
 
-    if not src_dir.exists() or not any(src_dir.iterdir()):
-        raise RuntimeError("raw/ is empty — input stage must run first")
-
-    # Skip logic
-    if out_dir.exists() and any(out_dir.iterdir()) and not force:
-        logger.info("images_filtered already exists; skipping stage")
+    if dst.exists() and any(dst.iterdir()) and not force:
+        logger.info("images_filtered exists — skipping")
         return
 
-    # Force cleanup
-    if force and out_dir.exists():
-        logger.warning("Force enabled — clearing images_filtered")
-        shutil.rmtree(out_dir)
+    if force and dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True, exist_ok=True)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    images = sorted(p for p in src.iterdir() if p.suffix.lower() in SUPPORTED_EXTS)
+    total = len(images)
 
-    blur_thresh = config.get("preprocessing", {}).get("blur_threshold", 0.0)
-    logger.info(f"Using blur threshold: {blur_thresh}")
+    logger.info(f"Filtering {total} images (SfM-safe mode)")
 
-    images = sorted(
-        p for p in src_dir.iterdir()
-        if p.suffix.lower() in SUPPORTED_IMAGE_EXTS
-    )
+    MIN_KEYPOINTS = 40        # catastrophic failure threshold
+    MAX_DROP_RATIO = 0.10     # never drop more than 10%
 
-    logger.info(f"Filtering {len(images)} raw images")
-
-    seen_hashes = {}
     kept = []
     dropped = []
-    frame_idx = 0
 
-    for img_path in images:
-        img = cv2.imread(str(img_path))
+    for path in tqdm(images, desc="Filtering", unit="img"):
+        img = cv2.imread(str(path))
         if img is None:
-            dropped.append({"file": img_path.name, "reason": "unreadable"})
+            dropped.append((path.name, "unreadable"))
             continue
 
-        bscore = blur_score(img)
-        if bscore < blur_thresh:
-            dropped.append({
-                "file": img_path.name,
-                "reason": "blur",
-                "score": float(bscore),
-            })
+        kps = keypoint_count(img)
+        if kps < MIN_KEYPOINTS:
+            dropped.append((path.name, f"no_features({kps})"))
             continue
 
-        h = image_hash(img)
-        if h in seen_hashes:
-            dropped.append({
-                "file": img_path.name,
-                "reason": "duplicate",
-                "duplicate_of": seen_hashes[h],
-            })
-            continue
+        out_name = f"img_{len(kept):06d}.jpg"
+        shutil.copy2(path, dst / out_name)
+        kept.append(out_name)
 
-        dst_name = f"img_{frame_idx:06d}.jpg"
-        shutil.copy2(img_path, out_dir / dst_name)
+    # ---------------- SAFETY NET ----------------
+    drop_ratio = len(dropped) / total if total else 0.0
 
-        seen_hashes[h] = dst_name
-        kept.append({
-            "source": img_path.name,
-            "output": dst_name,
-            "blur_score": float(bscore),
-        })
+    if drop_ratio > MAX_DROP_RATIO or len(kept) < max(8, int(total * 0.9)):
+        logger.warning(
+            "Filtering too destructive — reverting to no-op copy"
+        )
+        shutil.rmtree(dst)
+        dst.mkdir(parents=True, exist_ok=True)
 
-        frame_idx += 1
+        kept = []
+        dropped = []
+
+        for i, path in enumerate(images):
+            out = f"img_{i:06d}.jpg"
+            shutil.copy2(path, dst / out)
+            kept.append(out)
 
     report = {
-        "input_count": len(images),
-        "kept_count": len(kept),
-        "dropped_count": len(dropped),
-        "blur_threshold": blur_thresh,
-        "kept": kept,
-        "dropped": dropped,
+        "input": total,
+        "kept": len(kept),
+        "dropped": len(dropped),
+        "mode": "sfm-safe",
+        "min_keypoints": MIN_KEYPOINTS,
     }
 
-    report_path = out_dir / "filter_report.json"
-    with open(report_path, "w", encoding="utf-8") as f:
+    with open(dst / "filter_report.json", "w") as f:
         json.dump(report, f, indent=2)
 
-    logger.info(
-        f"Filtering complete: kept {len(kept)} / dropped {len(dropped)}"
-    )
-    logger.info(f"Filter report saved: {report_path}")
+    logger.info(f"Kept {len(kept)} / Dropped {len(dropped)}")

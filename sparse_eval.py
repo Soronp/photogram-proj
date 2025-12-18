@@ -1,14 +1,8 @@
-#!/usr/bin/env python3
-"""
-sparse_evaluation.py
 
-MARK-2 Sparse Evaluation Stage
------------------------------
-- Evaluates sparse reconstruction quality using COLMAP model_analyzer
-- Extracts key metrics for pipeline health and comparison
-- Writes JSON + CSV for downstream aggregation
-- Fully logged, deterministic, restart-safe
-"""
+
+# ==================================================================
+# sparse_evaluation.py (FIXED)
+# ==================================================================
 
 import argparse
 import json
@@ -19,7 +13,7 @@ from pathlib import Path
 
 from utils.logger import get_logger
 from utils.paths import ProjectPaths
-from utils.config import load_config, COLMAP_EXE
+from utils.config import COLMAP_EXE
 
 
 # ------------------------------------------------------------------
@@ -36,7 +30,7 @@ def run_command(cmd, logger, label):
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True
+        text=True,
     )
 
     logger.info(result.stdout)
@@ -48,11 +42,6 @@ def run_command(cmd, logger, label):
 # ------------------------------------------------------------------
 
 def parse_model_analyzer(output: str) -> dict:
-    """
-    Parse key metrics from COLMAP model_analyzer output.
-    Uses regex for version-robust extraction.
-    """
-
     metrics = {}
 
     patterns = {
@@ -81,7 +70,6 @@ def parse_model_analyzer(output: str) -> dict:
 
 def run_sparse_evaluation(project_root: Path, force: bool):
     paths = ProjectPaths(project_root)
-    config = load_config(project_root)
     logger = get_logger("sparse_evaluation", project_root)
 
     sparse_root = paths.sparse
@@ -95,15 +83,16 @@ def run_sparse_evaluation(project_root: Path, force: bool):
     if not sparse_root.exists():
         raise FileNotFoundError("sparse/ directory does not exist")
 
-    # Find sparse model folder (usually sparse/0)
-    model_dir = None
-    for d in sparse_root.iterdir():
-        if d.is_dir() and (d / "cameras.bin").exists():
-            model_dir = d
-            break
+    # Locate valid sparse model (sparse/0 preferred)
+    model_dirs = sorted(
+        d for d in sparse_root.iterdir()
+        if d.is_dir() and (d / "cameras.bin").exists()
+    )
 
-    if model_dir is None:
+    if not model_dirs:
         raise RuntimeError("No valid sparse model found for evaluation")
+
+    model_dir = model_dirs[0]
 
     metrics_json = eval_dir / "sparse_metrics.json"
     metrics_csv = eval_dir / "sparse_metrics.csv"
@@ -112,36 +101,23 @@ def run_sparse_evaluation(project_root: Path, force: bool):
         logger.info("Sparse metrics already exist — skipping evaluation")
         return
 
-    # --------------------------------------------------
-    # Run COLMAP model_analyzer
-    # --------------------------------------------------
-
     output = run_command(
-        [
-            COLMAP_EXE,
-            "model_analyzer",
-            "--path", model_dir
-        ],
+        [COLMAP_EXE, "model_analyzer", "--path", model_dir],
         logger,
-        "Sparse Model Analysis"
+        "Sparse Model Analysis",
     )
 
     metrics = parse_model_analyzer(output)
-    metrics["model_path"] = str(model_dir)
-    metrics["stage"] = "sparse"
-
-    # --------------------------------------------------
-    # Write JSON
-    # --------------------------------------------------
+    metrics.update({
+        "model_path": str(model_dir),
+        "stage": "sparse",
+        "openmvs_ready": True,  # gate for downstream stages
+    })
 
     with open(metrics_json, "w") as f:
         json.dump(metrics, f, indent=2)
 
     logger.info(f"Wrote sparse metrics JSON: {metrics_json}")
-
-    # --------------------------------------------------
-    # Write CSV (single-row, aggregator-friendly)
-    # --------------------------------------------------
 
     with open(metrics_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=metrics.keys())
@@ -159,11 +135,7 @@ def run_sparse_evaluation(project_root: Path, force: bool):
 def main():
     parser = argparse.ArgumentParser(description="MARK-2 Sparse Evaluation")
     parser.add_argument("project_root", type=Path)
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite existing sparse evaluation outputs"
-    )
+    parser.add_argument("--force", action="store_true")
 
     args = parser.parse_args()
     run_sparse_evaluation(args.project_root, args.force)

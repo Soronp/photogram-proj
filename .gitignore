@@ -27,3 +27,5 @@ config.yaml
 /images_processed
 /visualization
 OpenMVS_Windows_x64
+/cpu
+/gpu

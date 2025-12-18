@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-config_manager.py
+config_manager_v2.py
 
-MARK-2 Project Configuration Manager (Hybrid Dense Aware)
----------------------------------------------------------
+MARK-2 Project Configuration Manager (Full-Resolution, Hybrid Dense Aware)
+---------------------------------------------------------------------------
 - Always generates a fresh project-specific config.yaml
 - OpenMVS is primary dense backend, COLMAP is fallback
 - Merges defaults with dataset diagnostics
 - Deterministic, restart-safe
+- Maintains full image resolution (no downsampling)
 """
 
 from pathlib import Path
@@ -66,7 +67,7 @@ DEFAULT_CONFIG = {
 
         # ---- OpenMVS parameters ----
         "openmvs": {
-            "resolution_level": 1,
+            "resolution_level": 1,  # Always start at 1 (full resolution)
             "min_resolution": 640,
             "max_resolution": 2400,
             "num_threads": 0,        # 0 = auto
@@ -76,7 +77,7 @@ DEFAULT_CONFIG = {
 
         # ---- COLMAP fallback parameters ----
         "colmap": {
-            "max_image_size": 2400,
+            "max_image_size": 2400,  # Keep full resolution
             "patchmatch": {
                 "geom_consistency": True,
                 "num_iterations": 5,
@@ -115,6 +116,7 @@ DEFAULT_CONFIG = {
 def create_runtime_config(project_root: Path):
     """
     Generate a fresh config.yaml using defaults + dataset diagnostics.
+    Maintains full image resolution (no downsampling).
     """
     project_root = project_root.resolve()
     logger = get_logger("config_manager", project_root)
@@ -138,9 +140,6 @@ def create_runtime_config(project_root: Path):
 
             logger.info("Dataset diagnostics loaded")
 
-            preprocessing = diagnostics.get("preprocessing", {})
-            downsample = preprocessing.get("downsample_factor", 1.0)
-
             avg_features = diagnostics.get("avg_features", 4000)
             avg_blur = diagnostics.get("avg_blur", 0.0)
             image_count = diagnostics.get("image_count", 0)
@@ -150,39 +149,27 @@ def create_runtime_config(project_root: Path):
                 2000, int(avg_features * 1.1)
             )
 
-            # ---- OpenMVS resolution tuning ----
+            # ---- Keep full resolution for OpenMVS ----
             openmvs_cfg = config["dense_reconstruction"]["openmvs"]
+            openmvs_cfg["resolution_level"] = 1  # Force full resolution
+            openmvs_cfg["max_resolution"] = 2400
 
-            if image_count <= 50:
-                openmvs_cfg["resolution_level"] = 0
-            elif image_count <= 150:
-                openmvs_cfg["resolution_level"] = 1
-            else:
-                openmvs_cfg["resolution_level"] = 2
-
-            openmvs_cfg["max_resolution"] = int(
-                openmvs_cfg["max_resolution"] * downsample
-            )
-
-            # ---- COLMAP fallback tuning ----
+            # ---- Keep full resolution for COLMAP ----
             colmap_cfg = config["dense_reconstruction"]["colmap"]
-            colmap_cfg["max_image_size"] = int(
-                colmap_cfg["max_image_size"] * downsample
-            )
+            colmap_cfg["max_image_size"] = 2400
 
             # ---- Blur-based recommendations ----
             recommendations = diagnostics.get("recommendations", [])
             if avg_blur < 0.2:
                 recommendations.append(
-                    "Average blur is low; aggressive filtering may be required"
+                    "Average blur is low; consider aggressive filtering"
                 )
 
             if recommendations:
                 config["dataset_recommendations"] = recommendations
 
             logger.info(
-                f"Applied diagnostics overrides "
-                f"(downsample={downsample}, images={image_count})"
+                f"Applied diagnostics overrides (images={image_count}, features={avg_features})"
             )
 
         except Exception as e:
@@ -227,7 +214,7 @@ def validate_config(config: dict, logger) -> bool:
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="MARK-2 Runtime Config Manager")
+    parser = argparse.ArgumentParser(description="MARK-2 Runtime Config Manager (Full-Resolution)")
     parser.add_argument("project_root", type=Path)
     args = parser.parse_args()
 
