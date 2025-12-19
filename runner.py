@@ -2,8 +2,8 @@
 """
 runner.py
 
-MARK-2 Pipeline Runner
----------------------
+MARK-2 Pipeline Runner (OpenMVS-native)
+--------------------------------------
 - Deterministic execution order
 - Resume-safe
 - UI-ready
@@ -33,7 +33,7 @@ from config_manager import create_runtime_config
 from filter import run as run_image_filter
 from pre_proc import run as run_preprocess
 
-from db_builder import run 
+from db_builder import run as run_db_builder
 from matcher import run as run_matcher
 
 from sparse_reconstruction import run_sparse
@@ -43,11 +43,10 @@ from openmvs_export import run_openmvs_export
 from dense_reconstruction import run_dense
 from dense_eval import run_dense_evaluation
 
-from gen_mesh import run_mesh_generation
-from post_proc import run_mesh_postprocess
-from gen_tex import run_texture_mapping
-
+from gen_mesh import run_mesh_generation                 # OpenMVS mesh + texture (authoritative)
+from utils.mesh_cleanup import run_mesh_cleanup          # OPTIONAL hygiene utility
 from mesh_eval import run_mesh_evaluation
+
 from eval_agg import run_evaluation_aggregation
 from vis import run_visualization
 
@@ -66,7 +65,7 @@ PIPELINE: List[PipelineStage] = [
     ("filter",         run_image_filter),
     ("preprocess",     run_preprocess),
 
-    ("database",       run),
+    ("database",       run_db_builder),
     ("matcher",        run_matcher),
 
     ("sparse",         run_sparse),
@@ -77,11 +76,16 @@ PIPELINE: List[PipelineStage] = [
     ("dense",          run_dense),
     ("dense_eval",     run_dense_evaluation),
 
+    # -------------------------
+    # Mesh authority begins here
+    # -------------------------
     ("mesh",           run_mesh_generation),
-    ("mesh_post",      run_mesh_postprocess),
-    ("texture",        run_texture_mapping),
+
+    # Optional, non-authoritative hygiene
+    ("mesh_cleanup",   run_mesh_cleanup),
 
     ("mesh_eval",      run_mesh_evaluation),
+
     ("aggregate_eval", run_evaluation_aggregation),
     ("visualization",  run_visualization),
 ]
