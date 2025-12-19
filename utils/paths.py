@@ -16,7 +16,7 @@ class ProjectPaths:
         # Inputs
         # -----------------------------
         self.raw = self.root / "raw"
-        self.images = self.root / "images"
+        self.videos = self.root / "videos"
         self.images_filtered = self.root / "images_filtered"
         self.images_processed = self.root / "images_processed"
 
@@ -58,7 +58,7 @@ class ProjectPaths:
 
             # Inputs
             self.raw,
-            self.images,
+            self.videos,
             self.images_filtered,
             self.images_processed,
 
