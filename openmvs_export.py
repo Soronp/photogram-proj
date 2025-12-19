@@ -2,16 +2,14 @@
 """
 openmvs_export.py
 
-MARK-2 OpenMVS Export (User-Directed Sparse Input)
--------------------------------------------------
-- User provides sparse output root folder
-- export_ready.json must exist in that folder
-- Sparse model is inside a subfolder (e.g. 0/, 1/)
-- Produces OpenMVS scene.mvs deterministically
+MARK-2 OpenMVS Export (Pipeline-Owned Sparse Input)
+--------------------------------------------------
+- Uses MARK-2 canonical ProjectPaths
+- Consumes sparse reconstruction from project_root/sparse/*
+- Produces openmvs/scene.mvs deterministically
 """
 
 from pathlib import Path
-import json
 import shutil
 import subprocess
 
@@ -20,12 +18,13 @@ from utils.paths import ProjectPaths
 from utils.config import COLMAP_EXE
 
 
-def run(cmd, log, label):
+def run(cmd, log, label, cwd: Path):
     cmd = [str(c) for c in cmd]
     log.info(f"[RUN:{label}] {' '.join(cmd)}")
 
     proc = subprocess.run(
         cmd,
+        cwd=cwd,                       # 🔴 CRITICAL FIX
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -36,44 +35,51 @@ def run(cmd, log, label):
         raise RuntimeError(f"{label} failed")
 
 
+def find_sparse_model(sparse_root: Path) -> Path:
+    """
+    Finds a valid COLMAP sparse model inside sparse_root.
+    Assumes standard COLMAP layout: sparse/0/, sparse/1/, etc.
+    """
+    if not sparse_root.exists():
+        raise RuntimeError(f"Sparse root missing: {sparse_root}")
+
+    candidates = []
+    for d in sorted(sparse_root.iterdir()):
+        if not d.is_dir():
+            continue
+        files = {f.name for f in d.iterdir()}
+        if {"cameras.bin", "images.bin", "points3D.bin"}.issubset(files):
+            candidates.append(d)
+
+    if not candidates:
+        raise RuntimeError("No valid sparse model found in sparse/")
+
+    if len(candidates) > 1:
+        raise RuntimeError(
+            f"Multiple sparse models found: {candidates}. "
+            "MARK-2 requires one active sparse model."
+        )
+
+    return candidates[0]
+
+
 def run_openmvs_export(project_root: Path, force: bool):
     project_root = Path(project_root).resolve()
     paths = ProjectPaths(project_root)
     paths.ensure_all()
+    paths.validate()
 
     log = get_logger("openmvs_export", project_root)
     log.info("Starting OpenMVS export")
 
     # --------------------------------------------------
-    # Ask user for sparse root folder
+    # Locate sparse model (pipeline-owned)
     # --------------------------------------------------
-    sparse_root = Path(
-        input("Enter FULL path to sparse output folder: ").strip()
-    ).resolve()
-
-    if not sparse_root.exists():
-        raise RuntimeError(f"Sparse root not found: {sparse_root}")
-
-    export_json = sparse_root / "export_ready.json"
-    if not export_json.exists():
-        raise RuntimeError(f"export_ready.json not found in {sparse_root}")
-
-    meta = json.loads(export_json.read_text())
-    model_dir = meta.get("model_dir")
-
-    if not model_dir:
-        raise RuntimeError("export_ready.json missing 'model_dir'")
-
-    sparse_model = sparse_root / model_dir
-    if not sparse_model.exists():
-        raise RuntimeError(f"Sparse model folder not found: {sparse_model}")
-
-    required = {"cameras.bin", "images.bin", "points3D.bin"}
-    if not required.issubset({f.name for f in sparse_model.iterdir()}):
-        raise RuntimeError("Sparse model missing required COLMAP bin files")
+    sparse_model = find_sparse_model(paths.sparse)
+    log.info(f"Using sparse model: {sparse_model}")
 
     # --------------------------------------------------
-    # Prepare undistorted output
+    # Prepare undistorted workspace
     # --------------------------------------------------
     undistorted = paths.openmvs / "undistorted"
     if undistorted.exists() and force:
@@ -82,7 +88,7 @@ def run_openmvs_export(project_root: Path, force: bool):
     undistorted.mkdir(parents=True, exist_ok=True)
 
     # --------------------------------------------------
-    # COLMAP image undistortion (COLMAP format)
+    # COLMAP image undistortion
     # --------------------------------------------------
     run(
         [
@@ -94,15 +100,18 @@ def run_openmvs_export(project_root: Path, force: bool):
         ],
         log,
         "COLMAP image_undistorter",
+        cwd=project_root,
     )
 
-    # Remove stereo folder if created (OpenMVS requirement)
+    # Remove stereo folder (OpenMVS requirement)
     stereo = undistorted / "stereo"
     if stereo.exists():
         shutil.rmtree(stereo)
 
     # Validate undistorted sparse
     undistorted_sparse = undistorted / "sparse"
+    required = {"cameras.bin", "images.bin", "points3D.bin"}
+
     if not undistorted_sparse.exists():
         raise RuntimeError("Undistorted sparse folder missing")
 
@@ -125,6 +134,7 @@ def run_openmvs_export(project_root: Path, force: bool):
         ],
         log,
         "InterfaceCOLMAP",
+        cwd=project_root,
     )
 
     if not scene.exists() or scene.stat().st_size < 50_000:
