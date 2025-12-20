@@ -4,7 +4,7 @@ openmvs_export.py
 
 MARK-2 OpenMVS Export (Contract-Driven)
 --------------------------------------
-- Reads export_ready.json (no guessing)
+- Reads export_ready.json
 - Uses exactly one sparse model
 - Produces openmvs/scene.mvs deterministically
 """
@@ -14,17 +14,15 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from utils.logger import get_logger
 from utils.paths import ProjectPaths
 from utils.config import COLMAP_EXE
-
 
 REQUIRED = {"cameras.bin", "images.bin", "points3D.bin"}
 
 
-def run(cmd, log, label, cwd: Path):
+def run_command(cmd, label: str, cwd: Path, logger):
     cmd = [str(c) for c in cmd]
-    log.info(f"[RUN:{label}] {' '.join(cmd)}")
+    logger.info(f"[openmvs:{label}] {' '.join(cmd)}")
 
     proc = subprocess.run(
         cmd,
@@ -34,52 +32,43 @@ def run(cmd, log, label, cwd: Path):
         text=True,
     )
 
-    log.info(proc.stdout)
+    logger.info(proc.stdout)
     if proc.returncode != 0:
         raise RuntimeError(f"{label} failed")
 
 
-def run_openmvs_export(project_root: Path, force: bool):
+# --------------------------------------------------
+# PIPELINE STAGE
+# --------------------------------------------------
+def run(project_root: Path, force: bool, logger):
     project_root = Path(project_root).resolve()
     paths = ProjectPaths(project_root)
     paths.ensure_all()
     paths.validate()
 
-    log = get_logger("openmvs_export", project_root)
-    log.info("Starting OpenMVS export")
+    logger.info("[openmvs] Starting export")
 
-    # --------------------------------------------------
-    # Read authoritative sparse selection
-    # --------------------------------------------------
     meta_path = paths.sparse / "export_ready.json"
     if not meta_path.exists():
-        raise RuntimeError("export_ready.json missing (sparse stage not finalized)")
+        raise RuntimeError("export_ready.json missing")
 
     meta = json.loads(meta_path.read_text())
     model_dir = paths.sparse / meta["model_dir"]
 
     if not model_dir.exists():
-        raise RuntimeError(f"Declared sparse model missing: {model_dir}")
+        raise RuntimeError("Declared sparse model missing")
 
-    files = {f.name for f in model_dir.iterdir()}
-    if not REQUIRED.issubset(files):
-        raise RuntimeError("Declared sparse model is invalid")
+    if not REQUIRED.issubset({f.name for f in model_dir.iterdir()}):
+        raise RuntimeError("Sparse model invalid")
 
-    log.info(f"Using sparse model: {model_dir.name}")
+    logger.info(f"[openmvs] Using sparse model: {model_dir.name}")
 
-    # --------------------------------------------------
-    # Prepare undistorted workspace
-    # --------------------------------------------------
     undistorted = paths.openmvs / "undistorted"
     if undistorted.exists() and force:
         shutil.rmtree(undistorted)
-
     undistorted.mkdir(parents=True, exist_ok=True)
 
-    # --------------------------------------------------
-    # COLMAP image undistorter
-    # --------------------------------------------------
-    run(
+    run_command(
         [
             COLMAP_EXE, "image_undistorter",
             "--image_path", paths.images_processed,
@@ -87,44 +76,36 @@ def run_openmvs_export(project_root: Path, force: bool):
             "--output_path", undistorted,
             "--output_type", "COLMAP",
         ],
-        log,
-        "COLMAP image_undistorter",
+        "image_undistorter",
         cwd=project_root,
+        logger=logger,
     )
 
-    # Remove stereo (OpenMVS requirement)
     stereo = undistorted / "stereo"
     if stereo.exists():
         shutil.rmtree(stereo)
 
-    # Validate undistorted sparse
-    undistorted_sparse = undistorted / "sparse"
-    if not undistorted_sparse.exists():
-        raise RuntimeError("Undistorted sparse folder missing")
+    sparse_out = undistorted / "sparse"
+    if not sparse_out.exists():
+        raise RuntimeError("Undistorted sparse missing")
 
-    if not REQUIRED.issubset({f.name for f in undistorted_sparse.iterdir()}):
-        raise RuntimeError("Undistorted sparse is invalid")
-
-    # --------------------------------------------------
-    # InterfaceCOLMAP → scene.mvs
-    # --------------------------------------------------
     scene = paths.openmvs_scene
     if scene.exists() and force:
         scene.unlink()
 
-    run(
+    run_command(
         [
             "InterfaceCOLMAP",
             "-i", undistorted,
             "-o", scene,
             "--image-folder", undistorted / "images",
         ],
-        log,
         "InterfaceCOLMAP",
         cwd=project_root,
+        logger=logger,
     )
 
     if not scene.exists() or scene.stat().st_size < 50_000:
-        raise RuntimeError("scene.mvs not generated or invalid")
+        raise RuntimeError("scene.mvs invalid")
 
-    log.info(f"OpenMVS scene created successfully: {scene}")
+    logger.info(f"[openmvs] scene.mvs created successfully")

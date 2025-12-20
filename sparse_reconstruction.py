@@ -8,6 +8,7 @@ MARK-2 Sparse Reconstruction (Authoritative)
 - Selects best sparse model deterministically
 - Physically enforces ONE active sparse model
 - Writes export_ready.json (single source of truth)
+- Runner-managed logger
 """
 
 import json
@@ -16,7 +17,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from utils.logger import get_logger
 from utils.paths import ProjectPaths
 from utils.config import load_config, COLMAP_EXE
 
@@ -31,16 +31,17 @@ def hash_sparse(model_dir: Path) -> str:
     return h.hexdigest()
 
 
-def run_sparse(project_root: Path, force: bool):
+def run_sparse(project_root: Path, force: bool, logger):
     project_root = Path(project_root).resolve()
     load_config(project_root)
 
     paths = ProjectPaths(project_root)
     paths.ensure_all()
 
-    log = get_logger("sparse_reconstruction", project_root)
+    logger.info("[sparse] Starting sparse reconstruction")
 
     if paths.sparse.exists() and force:
+        logger.info("[sparse] Force enabled — removing existing sparse/")
         shutil.rmtree(paths.sparse)
 
     paths.sparse.mkdir(parents=True, exist_ok=True)
@@ -55,7 +56,7 @@ def run_sparse(project_root: Path, force: bool):
         "--output_path", paths.sparse,
     ]
 
-    log.info("[RUN:COLMAP mapper]")
+    logger.info("[sparse] Running COLMAP mapper")
     subprocess.run(cmd, check=True)
 
     # --------------------------------------------------
@@ -63,10 +64,7 @@ def run_sparse(project_root: Path, force: bool):
     # --------------------------------------------------
     models = []
     for d in sorted(paths.sparse.iterdir()):
-        if not d.is_dir():
-            continue
-        files = {f.name for f in d.iterdir()}
-        if REQUIRED.issubset(files):
+        if d.is_dir() and REQUIRED.issubset({f.name for f in d.iterdir()}):
             models.append(d)
 
     if not models:
@@ -76,10 +74,10 @@ def run_sparse(project_root: Path, force: bool):
     # Select best model (largest points3D.bin)
     # --------------------------------------------------
     best = max(models, key=lambda d: (d / "points3D.bin").stat().st_size)
-    log.info(f"Selected sparse model: {best.name}")
+    logger.info(f"[sparse] Selected model: {best.name}")
 
     # --------------------------------------------------
-    # ENFORCE SINGLE-SPARSE INVARIANT
+    # Enforce single-sparse invariant
     # --------------------------------------------------
     for d in models:
         if d != best:
@@ -98,4 +96,4 @@ def run_sparse(project_root: Path, force: bool):
     meta_path = paths.sparse / "export_ready.json"
     meta_path.write_text(json.dumps(meta, indent=2))
 
-    log.info("Sparse reconstruction finalized (single model enforced)")
+    logger.info("[sparse] Sparse reconstruction finalized")

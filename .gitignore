@@ -30,3 +30,4 @@ OpenMVS_Windows_x64
 /cpu
 /gpu
 /.vscode
+/runs/__pycache__/

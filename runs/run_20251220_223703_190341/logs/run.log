@@ -1,0 +1,48 @@
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: === MARK-2 PIPELINE STARTED ===
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: Run ID       : run_20251220_223703_190341
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: Project root : D:\CSE499_MK-2\photogram-proj
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: Input path   : D:\CSE499_MK-2\dice-turntable-strong-lights-heavily-textured-w-watercolors-master
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: Force        : False
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [init] START
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [init] Initializing output directory: D:\CSE499_MK-2\photogram-proj\evaluation
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [init] config.yaml written: D:\CSE499_MK-2\photogram-proj\evaluation\config.yaml
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [init] output.json written: D:\CSE499_MK-2\photogram-proj\evaluation\output.json
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [init] Output initialization complete
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [init] DONE in 0.01s
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [input] START
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [input] Starting input ingestion
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [input] Copied images: 33, videos: 0
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [input] Total images ready: 33
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [input] DONE in 0.09s
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [image_analysis] START
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [analyzer] Stage started
+[2025-12-21 04:37:03] [WARNING] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [analyzer] No images found in raw/
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [image_analysis] DONE in 0.01s
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [config] START
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [config] Generating runtime configuration
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [config] Target path: D:\CSE499_MK-2\photogram-proj\config.yaml
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [config] config.yaml written successfully
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [config] DONE in 0.01s
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [filter] START
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [filter] Stage started (SfM-safe)
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [filter] Processing 0 images
+[2025-12-21 04:37:03] [WARNING] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [filter] Filtering too destructive — reverting to no-op copy
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [filter] Kept 0 / Dropped 0
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [filter] Stage completed
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [filter] DONE in 0.01s
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [preprocess] START
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: images_processed exists — skipping
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [preprocess] DONE in 0.02s
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [database] START
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [database] Stage started
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [config] Generating runtime configuration
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [config] Target path: D:\CSE499_MK-2\photogram-proj\config.yaml
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [config] config.yaml written successfully
+[2025-12-21 04:37:03] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [config] Configuration validation passed
+[2025-12-21 04:37:04] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [database] Computed SIFT max_image_size = 3072
+[2025-12-21 04:37:04] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [database] Images        : 33
+[2025-12-21 04:37:04] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [database] Max features  : 20000
+[2025-12-21 04:37:04] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [database] Camera model  : PINHOLE
+[2025-12-21 04:37:04] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [database] Single camera : True
+[2025-12-21 04:37:04] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: [database] RUN: Feature Extraction (CPU)
+[2025-12-21 04:37:04] [INFO] run@D:\CSE499_MK-2\photogram-proj\runs\run_20251220_223703_190341\logs: colmap feature_extractor --database_path D:\CSE499_MK-2\photogram-proj\database\database.db --image_path D:\CSE499_MK-2\photogram-proj\images_processed --ImageReader.camera_model PINHOLE --ImageReader.single_camera 1 --SiftExtraction.max_image_size 3072 --SiftExtraction.max_num_features 20000 --SiftExtraction.edge_threshold 10 --SiftExtraction.first_octave -1 --SiftExtraction.num_octaves 5 --SiftExtraction.octave_resolution 3 --SiftExtraction.peak_threshold 0.006

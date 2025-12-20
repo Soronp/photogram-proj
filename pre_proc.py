@@ -6,8 +6,8 @@ MARK-2 Image Preprocessing Stage (OpenMVS-Accurate)
 --------------------------------------------------
 - Converts filtered images to COLMAP-friendly JPEG
 - Applies EXIF orientation
-- Preserves high-resolution geometry for OpenMVS
-- Enforces uniform image dimensions (LETTERBOX PAD)
+- Preserves high-resolution geometry
+- Letterbox pads to uniform square canvas
 - Sequentially renames images
 """
 
@@ -15,8 +15,8 @@ import shutil
 from pathlib import Path
 from PIL import Image, ImageOps
 import numpy as np
+import logging
 
-from utils.logger import get_logger
 from utils.paths import ProjectPaths
 from utils.config import load_config
 
@@ -25,17 +25,34 @@ from utils.config import load_config
 # -----------------------------
 JPEG_QUALITY = 98
 VALID_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
-
 MAX_SAFE_RESOLUTION = 4608
 MIN_RESOLUTION = 2000
-PAD_COLOR = (0, 0, 0)  # black padding (geometry-safe)
+PAD_COLOR = (0, 0, 0)
+
+# -----------------------------
+# Logger
+# -----------------------------
+def make_logger(name: str, log_dir: Path):
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+
+    if not logger.handlers:
+        fh = logging.FileHandler(log_dir / f"{name}.log")
+        sh = logging.StreamHandler()
+        fmt = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
+        fh.setFormatter(fmt)
+        sh.setFormatter(fmt)
+        logger.addHandler(fh)
+        logger.addHandler(sh)
+
+    return logger
 
 # -----------------------------
 # Helpers
 # -----------------------------
-def is_image_file(path: Path) -> bool:
-    return path.suffix.lower() in VALID_EXTS
-
+def is_image_file(p: Path) -> bool:
+    return p.suffix.lower() in VALID_EXTS
 
 def determine_target_resolution(images: list[Path], logger) -> int:
     max_dims = []
@@ -44,7 +61,7 @@ def determine_target_resolution(images: list[Path], logger) -> int:
             with Image.open(p) as img:
                 max_dims.append(max(img.size))
         except Exception:
-            logger.debug(f"Unreadable image skipped: {p.name}")
+            logger.warning(f"Unreadable image skipped: {p.name}")
 
     if not max_dims:
         raise RuntimeError("Failed to determine image resolutions")
@@ -54,107 +71,94 @@ def determine_target_resolution(images: list[Path], logger) -> int:
 
     if image_count <= 150:
         target = median_dim
-        logger.info("Small dataset detected — preserving native resolution")
+        logger.info("Small dataset — preserving native resolution")
     else:
         target = int(median_dim * 0.75)
-        logger.info("Large dataset detected — moderate downscaling")
+        logger.info("Large dataset — moderate downscaling")
 
     target = min(target, MAX_SAFE_RESOLUTION)
     target = max(target, MIN_RESOLUTION)
-
-    logger.info(
-        f"Target canvas size: {target}x{target}px "
-        f"(median={median_dim}px, images={image_count})"
-    )
+    logger.info(f"Target canvas size: {target}x{target}px")
     return target
 
-
-def preprocess_image(
-    src: Path,
-    dst: Path,
-    target_size: int,
-    logger,
-):
+def preprocess_image(src: Path, dst: Path, target: int, logger) -> bool:
     try:
         img = Image.open(src)
     except Exception as e:
         logger.warning(f"Unreadable image skipped: {src.name} ({e})")
         return False
 
-    # EXIF orientation
     img = ImageOps.exif_transpose(img)
 
-    # RGB enforcement
     if img.mode != "RGB":
         img = img.convert("RGB")
 
     w, h = img.size
-    scale = target_size / max(w, h)
-    new_w = int(round(w * scale))
-    new_h = int(round(h * scale))
+    scale = target / max(w, h)
+    new_w, new_h = int(w * scale), int(h * scale)
 
     img = img.resize((new_w, new_h), Image.LANCZOS)
+    canvas = Image.new("RGB", (target, target), PAD_COLOR)
+    canvas.paste(img, ((target - new_w) // 2, (target - new_h) // 2))
 
-    # Letterbox pad to exact canvas
-    canvas = Image.new("RGB", (target_size, target_size), PAD_COLOR)
-    offset_x = (target_size - new_w) // 2
-    offset_y = (target_size - new_h) // 2
-    canvas.paste(img, (offset_x, offset_y))
-
-    canvas.save(
-        dst,
-        format="JPEG",
-        quality=JPEG_QUALITY,
-        subsampling=0,
-        optimize=True,
-    )
-
-    logger.debug(
-        f"{src.name}: {w}x{h} → {new_w}x{new_h} padded to {target_size}x{target_size}"
-    )
+    canvas.save(dst, format="JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True)
     return True
 
-
 # -----------------------------
-# Pipeline entrypoint
+# Pipeline
 # -----------------------------
-def run(project_root: Path, force: bool):
+def run(project_root: Path, force: bool, logger=None):
+    """
+    Modernized pre-processing stage to work with runner:
+    Accepts (project_root, force, logger)
+    """
     paths = ProjectPaths(project_root)
     paths.ensure_all()
-
-    logger = get_logger("pre_processing", project_root)
     load_config(project_root)
 
-    src_dir = paths.images_filtered
-    out_dir = paths.images_processed
+    if logger is None:
+        logger = make_logger("pre_processing", paths.logs)
 
-    if not src_dir.exists():
-        raise RuntimeError(f"Input directory does not exist: {src_dir}")
+    src = paths.images_filtered
+    dst = paths.images_processed
 
-    if out_dir.exists() and any(out_dir.iterdir()):
+    if not src.exists():
+        raise RuntimeError("images_filtered/ missing")
+
+    if dst.exists() and any(dst.iterdir()):
         if not force:
-            logger.info("images_processed exists; skipping preprocessing")
+            logger.info("images_processed exists — skipping")
             return
-        logger.warning("Force enabled — removing existing images_processed")
-        shutil.rmtree(out_dir)
+        logger.warning("Force enabled — clearing images_processed")
+        shutil.rmtree(dst)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    dst.mkdir(parents=True, exist_ok=True)
 
-    images = sorted(p for p in src_dir.iterdir() if is_image_file(p))
+    images = sorted(p for p in src.iterdir() if is_image_file(p))
     if not images:
-        raise RuntimeError("No valid images found in images_filtered/")
+        raise RuntimeError("No valid images in images_filtered")
 
-    target_size = determine_target_resolution(images, logger)
+    target = determine_target_resolution(images, logger)
 
     processed = 0
-    for idx, img_path in enumerate(images):
-        dst = out_dir / f"img_{idx:06d}.jpg"
-        if preprocess_image(img_path, dst, target_size, logger):
+    for i, img in enumerate(images):
+        out = dst / f"img_{i:06d}.jpg"
+        if preprocess_image(img, out, target, logger):
             processed += 1
 
     if processed == 0:
-        raise RuntimeError("No images were successfully preprocessed")
+        raise RuntimeError("No images were successfully processed")
 
     logger.info(f"Preprocessing complete: {processed} images")
-    logger.info(f"All images standardized to: {target_size}x{target_size}")
-    logger.info("Preprocessed images ready for database building and matching")
+    logger.info(f"Final resolution: {target}x{target}")
+
+# -----------------------------
+# CLI
+# -----------------------------
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args()
+    run(Path(args.project), args.force)

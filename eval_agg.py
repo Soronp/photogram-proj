@@ -4,43 +4,39 @@ evaluation_aggregator.py
 
 MARK-2 Evaluation Aggregation Stage
 -----------------------------------
-- Aggregates evaluation metrics from all stages
-- Handles missing metrics gracefully
-- Produces unified JSON and CSV summaries
-- Deterministic and restart-safe
-- Pipeline-compatible: run_evaluation_aggregation(project_root, force)
+Aggregates sparse / dense / mesh metrics.
+Runner-managed, deterministic.
 """
 
-import argparse
 import json
 import csv
 from pathlib import Path
 
-from utils.logger import get_logger
 from utils.paths import ProjectPaths
 from utils.config import load_config
 
 
-# ------------------------------------------------------------------
-# Aggregation logic
-# ------------------------------------------------------------------
+# --------------------------------------------------
+# PIPELINE STAGE
+# --------------------------------------------------
 
-def run_evaluation_aggregation(project_root: Path, force: bool = False):
+def run(project_root: Path, force: bool, logger):
     paths = ProjectPaths(project_root)
     _ = load_config(project_root)
-    logger = get_logger("evaluation_aggregator", project_root)
 
     eval_dir = paths.evaluation
     summary_json = eval_dir / "summary.json"
     summary_csv = eval_dir / "summary.csv"
 
-    logger.info("=== Evaluation Aggregation Stage ===")
-    logger.info(f"Evaluation dir : {eval_dir}")
+    logger.info("[eval_agg] Stage started")
 
     if not eval_dir.exists():
         raise FileNotFoundError("Evaluation directory does not exist")
 
-    # Known metric files (extendable)
+    if summary_json.exists() and not force:
+        logger.info("[eval_agg] Summary already exists — skipping")
+        return
+
     metric_files = {
         "sparse": eval_dir / "sparse_metrics.json",
         "dense": eval_dir / "dense_metrics.json",
@@ -55,22 +51,17 @@ def run_evaluation_aggregation(project_root: Path, force: bool = False):
 
     flat_rows = []
 
-    # --------------------------------------------------
-    # Load available metrics
-    # --------------------------------------------------
-
     for stage, path in metric_files.items():
         if not path.exists():
-            logger.warning(f"Metrics missing for stage '{stage}' — skipping")
+            logger.warning(f"[eval_agg] Missing metrics: {stage}")
             continue
 
-        logger.info(f"Loading metrics: {path.name}")
+        logger.info(f"[eval_agg] Loading {path.name}")
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         aggregated["stages"][stage] = data
 
-        # Flatten for CSV
         for key, value in data.items():
             if isinstance(value, (int, float, str, bool)):
                 flat_rows.append({
@@ -79,21 +70,10 @@ def run_evaluation_aggregation(project_root: Path, force: bool = False):
                     "value": value,
                 })
 
-    if not aggregated["stages"]:
-        logger.warning("No evaluation metrics found — summary will be empty")
-
-    # --------------------------------------------------
-    # Write summary.json
-    # --------------------------------------------------
-
     with open(summary_json, "w", encoding="utf-8") as f:
         json.dump(aggregated, f, indent=2)
 
-    logger.info(f"Summary JSON written to: {summary_json}")
-
-    # --------------------------------------------------
-    # Write summary.csv
-    # --------------------------------------------------
+    logger.info(f"[eval_agg] Summary JSON written: {summary_json}")
 
     if flat_rows:
         with open(summary_csv, "w", newline="", encoding="utf-8") as f:
@@ -104,25 +84,8 @@ def run_evaluation_aggregation(project_root: Path, force: bool = False):
             writer.writeheader()
             writer.writerows(flat_rows)
 
-        logger.info(f"Summary CSV written to: {summary_csv}")
+        logger.info(f"[eval_agg] Summary CSV written: {summary_csv}")
     else:
-        logger.warning("No scalar metrics available for CSV export")
+        logger.warning("[eval_agg] No scalar metrics for CSV")
 
-    logger.info("Evaluation aggregation completed successfully")
-
-
-# ------------------------------------------------------------------
-# CLI
-# ------------------------------------------------------------------
-
-def main():
-    parser = argparse.ArgumentParser(description="MARK-2 Evaluation Aggregator")
-    parser.add_argument("project_root", type=Path)
-    parser.add_argument("--force", action="store_true", help="Force re-aggregation")
-    args = parser.parse_args()
-
-    run_evaluation_aggregation(args.project_root, args.force)
-
-
-if __name__ == "__main__":
-    main()
+    logger.info("[eval_agg] Stage completed")

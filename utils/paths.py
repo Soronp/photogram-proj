@@ -5,8 +5,8 @@ class ProjectPaths:
     """
     MARK-2 canonical project layout (OpenMVS-first).
 
-    This class is the ONLY authority for filesystem structure.
-    No stage may invent paths outside this contract.
+    This class is the SINGLE authority for filesystem structure.
+    No pipeline stage may invent paths outside this contract.
     """
 
     def __init__(self, project_root: Path):
@@ -27,11 +27,11 @@ class ProjectPaths:
         self.sparse = self.root / "sparse"
 
         # -----------------------------
-        # OpenMVS (authoritative dense backend)
+        # OpenMVS (authoritative backend)
         # -----------------------------
         self.openmvs = self.root / "openmvs"
 
-        # FILE — must NEVER be mkdir'ed
+        # FILE — must never be mkdir'ed
         self.openmvs_scene = self.openmvs / "scene.mvs"
 
         self.openmvs_dense = self.openmvs / "dense"
@@ -46,14 +46,16 @@ class ProjectPaths:
         self.textures = self.root / "textures"
         self.evaluation = self.root / "evaluation"
         self.visualization = self.root / "visualization"
+
+        # Execution metadata
         self.logs = self.root / "logs"
         self.runs = self.root / "runs"
 
     # ------------------------------------------------------------------
-    # Directory creation — STRICTLY directories, NEVER files
+    # Directory creation — DIRECTORIES ONLY
     # ------------------------------------------------------------------
     def ensure_all(self):
-        directories = [
+        dirs = [
             self.root,
 
             # Inputs
@@ -72,23 +74,25 @@ class ProjectPaths:
             self.openmvs_mesh,
             self.openmvs_texture,
 
-            # Tool-agnostic
+            # Tool-agnostic outputs
             self.mesh,
             self.textures,
             self.evaluation,
             self.visualization,
+
+            # Metadata
             self.logs,
             self.runs,
         ]
 
-        for d in directories:
+        for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # Contract validation (structure, not existence)
+    # Structural validation (NOT existence checks)
     # ------------------------------------------------------------------
     def validate(self):
-        required_attrs = [
+        required = [
             "dense",
             "openmvs",
             "openmvs_scene",
@@ -96,14 +100,14 @@ class ProjectPaths:
             "images_processed",
         ]
 
-        for name in required_attrs:
-            if not hasattr(self, name):
-                raise RuntimeError(f"ProjectPaths missing attribute: {name}")
+        for attr in required:
+            if not hasattr(self, attr):
+                raise RuntimeError(f"ProjectPaths missing attribute: {attr}")
 
-        # scene.mvs must be a FILE path, not a directory
+        # scene.mvs must be a file path, not a directory
         if self.openmvs_scene.exists() and self.openmvs_scene.is_dir():
             raise RuntimeError(
-                "openmvs_scene points to a directory, expected a file: scene.mvs"
+                "openmvs_scene refers to a directory; expected file path: scene.mvs"
             )
 
     def __repr__(self):

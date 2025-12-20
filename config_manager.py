@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-config_manager_v2.py
+config_manager.py
 
 MARK-2 Project Configuration Manager (Full-Resolution, Hybrid Dense Aware)
 ---------------------------------------------------------------------------
@@ -9,16 +9,22 @@ MARK-2 Project Configuration Manager (Full-Resolution, Hybrid Dense Aware)
 - Merges defaults with dataset diagnostics
 - Deterministic, restart-safe
 - Maintains full image resolution (no downsampling)
+
+LOGGER POLICY:
+- Logger is injected by runner
+- This module NEVER creates its own logger
 """
 
 from pathlib import Path
 import yaml
 import json
-from utils.logger import get_logger
+from utils.paths import ProjectPaths
+
 
 # -------------------------------------------------
 # COMPLETE DEFAULT CONFIGURATION (PIPELINE-WIDE)
 # -------------------------------------------------
+
 DEFAULT_CONFIG = {
     "project_name": "MARK-2_Project",
 
@@ -65,19 +71,17 @@ DEFAULT_CONFIG = {
         "primary": "OPENMVS",
         "secondary": "COLMAP",
 
-        # ---- OpenMVS parameters ----
         "openmvs": {
-            "resolution_level": 1,  # Always start at 1 (full resolution)
+            "resolution_level": 1,   # FULL resolution
             "min_resolution": 640,
             "max_resolution": 2400,
-            "num_threads": 0,        # 0 = auto
+            "num_threads": 0,
             "use_cuda": True,
             "dense_reuse_depth": True
         },
 
-        # ---- COLMAP fallback parameters ----
         "colmap": {
-            "max_image_size": 2400,  # Keep full resolution
+            "max_image_size": 2400,
             "patchmatch": {
                 "geom_consistency": True,
                 "num_iterations": 5,
@@ -110,23 +114,32 @@ DEFAULT_CONFIG = {
     }
 }
 
+
 # -------------------------------------------------
-# CONFIG CREATION LOGIC
+# CONFIG CREATION LOGIC (RUN-AWARE)
 # -------------------------------------------------
-def create_runtime_config(project_root: Path):
+
+def create_runtime_config(project_root: Path, logger):
     """
     Generate a fresh config.yaml using defaults + dataset diagnostics.
-    Maintains full image resolution (no downsampling).
+
+    Args:
+        project_root (Path): MARK-2 output root
+        logger: Injected run logger (MANDATORY)
+
+    Returns:
+        dict: Generated configuration
     """
     project_root = project_root.resolve()
-    logger = get_logger("config_manager", project_root)
+    paths = ProjectPaths(project_root)
 
     config_path = project_root / "config.yaml"
-    diagnostics_path = project_root / "evaluation" / "dataset_diagnostics.json"
+    diagnostics_path = paths.evaluation / "dataset_diagnostics.json"
 
-    logger.info(f"Generating runtime configuration: {config_path}")
+    logger.info("[config] Generating runtime configuration")
+    logger.info(f"[config] Target path: {config_path}")
 
-    # Deep copy defaults
+    # Deep copy defaults (safe)
     config = yaml.safe_load(yaml.dump(DEFAULT_CONFIG))
     config["project_name"] = project_root.name
 
@@ -138,7 +151,7 @@ def create_runtime_config(project_root: Path):
             with open(diagnostics_path, "r", encoding="utf-8") as f:
                 diagnostics = json.load(f)
 
-            logger.info("Dataset diagnostics loaded")
+            logger.info("[config] Dataset diagnostics loaded")
 
             avg_features = diagnostics.get("avg_features", 4000)
             avg_blur = diagnostics.get("avg_blur", 0.0)
@@ -149,16 +162,12 @@ def create_runtime_config(project_root: Path):
                 2000, int(avg_features * 1.1)
             )
 
-            # ---- Keep full resolution for OpenMVS ----
-            openmvs_cfg = config["dense_reconstruction"]["openmvs"]
-            openmvs_cfg["resolution_level"] = 1  # Force full resolution
-            openmvs_cfg["max_resolution"] = 2400
+            # ---- Force full resolution ----
+            config["dense_reconstruction"]["openmvs"]["resolution_level"] = 1
+            config["dense_reconstruction"]["openmvs"]["max_resolution"] = 2400
+            config["dense_reconstruction"]["colmap"]["max_image_size"] = 2400
 
-            # ---- Keep full resolution for COLMAP ----
-            colmap_cfg = config["dense_reconstruction"]["colmap"]
-            colmap_cfg["max_image_size"] = 2400
-
-            # ---- Blur-based recommendations ----
+            # ---- Recommendations ----
             recommendations = diagnostics.get("recommendations", [])
             if avg_blur < 0.2:
                 recommendations.append(
@@ -169,11 +178,12 @@ def create_runtime_config(project_root: Path):
                 config["dataset_recommendations"] = recommendations
 
             logger.info(
-                f"Applied diagnostics overrides (images={image_count}, features={avg_features})"
+                f"[config] Applied diagnostics "
+                f"(images={image_count}, avg_features={avg_features})"
             )
 
-        except Exception as e:
-            logger.warning(f"Failed to apply diagnostics: {e}")
+        except Exception as exc:
+            logger.warning(f"[config] Failed to apply diagnostics: {exc}")
 
     # -----------------------------------------
     # Write config.yaml
@@ -181,50 +191,32 @@ def create_runtime_config(project_root: Path):
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, sort_keys=False)
 
-    logger.info("Runtime config.yaml written successfully")
+    logger.info("[config] config.yaml written successfully")
     return config
 
+
 # -------------------------------------------------
-# VALIDATION
+# VALIDATION (LOGGER-INJECTED)
 # -------------------------------------------------
+
 def validate_config(config: dict, logger) -> bool:
     required_sections = [
         "camera",
         "feature_extraction",
         "matching",
         "sparse_reconstruction",
-        "dense_reconstruction"
+        "dense_reconstruction",
     ]
 
     for section in required_sections:
         if section not in config:
-            logger.error(f"Missing config section: {section}")
+            logger.error(f"[config] Missing section: {section}")
             return False
 
     dense = config["dense_reconstruction"]
     if dense.get("primary") not in {"OPENMVS", "COLMAP"}:
-        logger.error("Invalid dense reconstruction primary backend")
+        logger.error("[config] Invalid dense reconstruction primary backend")
         return False
 
+    logger.info("[config] Configuration validation passed")
     return True
-
-# -------------------------------------------------
-# CLI
-# -------------------------------------------------
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="MARK-2 Runtime Config Manager (Full-Resolution)")
-    parser.add_argument("project_root", type=Path)
-    args = parser.parse_args()
-
-    logger = get_logger("config_manager", args.project_root)
-    config = create_runtime_config(args.project_root)
-
-    if validate_config(config, logger):
-        logger.info("Configuration validated and ready")
-    else:
-        logger.error("Configuration validation failed")
-
-if __name__ == "__main__":
-    main()
