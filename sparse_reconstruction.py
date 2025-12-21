@@ -31,7 +31,7 @@ def hash_sparse(model_dir: Path) -> str:
     return h.hexdigest()
 
 
-def run_sparse(project_root: Path, force: bool, logger):
+def run_sparse(run_root: Path, project_root: Path, force: bool, logger):
     project_root = Path(project_root).resolve()
     load_config(project_root)
 

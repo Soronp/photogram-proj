@@ -69,14 +69,14 @@ def match_stats(db: Path, logger):
 # --------------------------------------------------
 # Pipeline stage
 # --------------------------------------------------
-def run(project_root: Path, force: bool, logger):
+def run(run_root: Path, project_root: Path, force: bool, logger):
     paths = ProjectPaths(project_root)
     paths.ensure_all()
 
     logger.info("[matcher] Starting exhaustive matching")
 
     # Load and validate config
-    config = create_runtime_config(project_root, logger)
+    config = create_runtime_config(run_root, project_root, logger)
     validate_config(config, logger)
 
     db = paths.database / "database.db"

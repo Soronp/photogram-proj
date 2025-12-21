@@ -77,7 +77,7 @@ def parse_metrics(output: str) -> dict:
 # -----------------------------
 # Pipeline
 # -----------------------------
-def run(project_root: Path, force: bool, logger):
+def run(run_root: Path, project_root: Path, force: bool, logger):
     paths = ProjectPaths(project_root)
     paths.ensure_all()
 

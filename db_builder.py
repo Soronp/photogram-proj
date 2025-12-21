@@ -78,7 +78,7 @@ def auto_max_features(num_images: int) -> int:
 # --------------------------------------------------
 # PIPELINE STAGE ENTRYPOINT (STRICT CONTRACT)
 # --------------------------------------------------
-def run(project_root: Path, force: bool, logger):
+def run(run_root: Path, project_root: Path, force: bool, logger):
     """
     MARK-2 pipeline stage: database builder
 
@@ -96,7 +96,7 @@ def run(project_root: Path, force: bool, logger):
     # --------------------------------------------------
     # CONFIG
     # --------------------------------------------------
-    config = create_runtime_config(project_root, logger)  # <-- PASS LOGGER
+    config = create_runtime_config(run_root, project_root, logger)
     validate_config(config, logger)
 
     # --------------------------------------------------

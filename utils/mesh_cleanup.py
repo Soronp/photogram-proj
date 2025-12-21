@@ -25,7 +25,7 @@ from utils.config import load_config
 # ------------------------------------------------------------------
 # Mesh cleanup pipeline
 # ------------------------------------------------------------------
-def run(project_root: Path, force: bool, logger):
+def run(run_root: Path, project_root: Path, force: bool, logger):
     project_root = project_root.resolve()
     paths = ProjectPaths(project_root)
     config = load_config(project_root)

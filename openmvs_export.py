@@ -40,7 +40,7 @@ def run_command(cmd, label: str, cwd: Path, logger):
 # --------------------------------------------------
 # PIPELINE STAGE
 # --------------------------------------------------
-def run(project_root: Path, force: bool, logger):
+def run(run_root: Path, project_root: Path, force: bool, logger):
     project_root = Path(project_root).resolve()
     paths = ProjectPaths(project_root)
     paths.ensure_all()

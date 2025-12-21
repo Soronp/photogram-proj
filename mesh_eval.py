@@ -28,7 +28,7 @@ DEGENERATE_EPS = 1e-12
 # -----------------------------
 # PIPELINE STAGE
 # -----------------------------
-def run(project_root: Path, force: bool, logger):
+def run(run_root: Path, project_root: Path, force: bool, logger):
     paths = ProjectPaths(project_root)
     _ = load_config(project_root)
 

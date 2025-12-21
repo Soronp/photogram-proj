@@ -107,7 +107,7 @@ def preprocess_image(src: Path, dst: Path, target: int, logger) -> bool:
 # -----------------------------
 # Pipeline
 # -----------------------------
-def run(project_root: Path, force: bool, logger=None):
+def run(run_root: Path, project_root: Path, force: bool, logger):
     """
     Modernized pre-processing stage to work with runner:
     Accepts (project_root, force, logger)

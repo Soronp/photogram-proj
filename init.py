@@ -17,7 +17,7 @@ import yaml
 from utils.paths import ProjectPaths
 
 
-def run(project_root: Path, force: bool, logger=None):
+def run(run_root: Path, project_root: Path, force: bool, logger):
     """
     Initialize project output directories and config.
     Compatible with MARK-2 pipeline runner (accepts logger).

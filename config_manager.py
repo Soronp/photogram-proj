@@ -2,13 +2,12 @@
 """
 config_manager.py
 
-MARK-2 Project Configuration Manager (Full-Resolution, Hybrid Dense Aware)
----------------------------------------------------------------------------
-- Always generates a fresh project-specific config.yaml
-- OpenMVS is primary dense backend, COLMAP is fallback
-- Merges defaults with dataset diagnostics
-- Deterministic, restart-safe
-- Maintains full image resolution (no downsampling)
+MARK-2 Adaptive Configuration Manager
+-------------------------------------
+- Generates a run-specific config.yaml
+- Fully driven by dataset_intelligence.json
+- Deterministic, explainable, restart-safe
+- No implicit defaults, no silent heuristics
 
 LOGGER POLICY:
 - Logger is injected by runner
@@ -18,204 +17,224 @@ LOGGER POLICY:
 from pathlib import Path
 import yaml
 import json
+from copy import deepcopy
 from utils.paths import ProjectPaths
 
 
-# -------------------------------------------------
-# COMPLETE DEFAULT CONFIGURATION (PIPELINE-WIDE)
-# -------------------------------------------------
+# =================================================
+# BASELINE CONFIG (ONLY WHAT CAN BE MODIFIED)
+# =================================================
 
-DEFAULT_CONFIG = {
-    "project_name": "MARK-2_Project",
-
-    # -----------------
-    # Camera calibration
-    # -----------------
+BASE_CONFIG = {
     "camera": {
         "model": "PINHOLE",
-        "single": True
+        "single": True,
     },
 
-    # -----------------
-    # Feature extraction
-    # -----------------
     "feature_extraction": {
         "max_num_features": 8192,
-        "edge_threshold": 10
+        "edge_threshold": 10,
     },
 
-    # -----------------
-    # Feature matching
-    # -----------------
     "matching": {
         "method": "exhaustive",
         "max_num_matches": 32768,
         "max_ratio": 0.8,
-        "max_distance": 0.7
+        "max_distance": 0.7,
     },
 
-    # -----------------
-    # Sparse reconstruction
-    # -----------------
     "sparse_reconstruction": {
         "method": "GLOMAP",
         "rotation_filtering_angle_threshold": 30,
         "min_num_inliers": 15,
-        "min_inlier_ratio": 0.15
+        "min_inlier_ratio": 0.15,
     },
 
-    # -----------------
-    # Dense reconstruction (HYBRID)
-    # -----------------
     "dense_reconstruction": {
         "primary": "OPENMVS",
-        "secondary": "COLMAP",
 
         "openmvs": {
-            "resolution_level": 1,   # FULL resolution
+            "resolution_level": 1,
             "min_resolution": 640,
             "max_resolution": 2400,
             "num_threads": 0,
             "use_cuda": True,
-            "dense_reuse_depth": True
+            "dense_reuse_depth": True,
         },
 
-        "colmap": {
+        "colmap_fallback": {
             "max_image_size": 2400,
-            "patchmatch": {
-                "geom_consistency": True,
-                "num_iterations": 5,
-                "num_samples": 25,
-                "cache_size": 32
-            }
-        }
+        },
     },
 
-    # -----------------
-    # Mesh generation
-    # -----------------
     "mesh": {
         "enabled": True,
-        "poisson_depth": 10
+        "poisson_depth": 10,
     },
 
-    # -----------------
-    # Texture mapping
-    # -----------------
     "texture": {
-        "enabled": True
+        "enabled": True,
     },
 
-    # -----------------
-    # Evaluation
-    # -----------------
     "evaluation": {
-        "enabled": True
-    }
+        "enabled": True,
+    },
 }
 
 
-# -------------------------------------------------
-# CONFIG CREATION LOGIC (RUN-AWARE)
-# -------------------------------------------------
+# =================================================
+# POLICY ENGINE
+# =================================================
 
-def create_runtime_config(project_root: Path, logger):
+def create_runtime_config(run_root: Path, project_root: Path, logger):
     """
-    Generate a fresh config.yaml using defaults + dataset diagnostics.
-
-    Args:
-        project_root (Path): MARK-2 output root
-        logger: Injected run logger (MANDATORY)
-
-    Returns:
-        dict: Generated configuration
+    Generate a dataset-precise config.yaml for the current run.
     """
+    run_root = run_root.resolve()
     project_root = project_root.resolve()
-    paths = ProjectPaths(project_root)
+    paths = ProjectPaths(run_root)
+
+
 
     config_path = project_root / "config.yaml"
-    diagnostics_path = paths.evaluation / "dataset_diagnostics.json"
+    intelligence_path = paths.evaluation / "dataset_intelligence.json"
 
-    logger.info("[config] Generating runtime configuration")
-    logger.info(f"[config] Target path: {config_path}")
+    logger.info("[config] MARK-2 adaptive config generation started")
+    logger.info(f"[config] Project root: {project_root}")
 
-    # Deep copy defaults (safe)
-    config = yaml.safe_load(yaml.dump(DEFAULT_CONFIG))
+    config = deepcopy(BASE_CONFIG)
     config["project_name"] = project_root.name
 
-    # -----------------------------------------
-    # Apply dataset diagnostics if available
-    # -----------------------------------------
-    if diagnostics_path.exists():
-        try:
-            with open(diagnostics_path, "r", encoding="utf-8") as f:
-                diagnostics = json.load(f)
+    if not intelligence_path.exists():
+        logger.error("[config] dataset_intelligence.json not found — refusing to guess")
+        raise FileNotFoundError(intelligence_path)
 
-            logger.info("[config] Dataset diagnostics loaded")
+    with open(intelligence_path, "r", encoding="utf-8") as f:
+        intel = json.load(f)
 
-            avg_features = diagnostics.get("avg_features", 4000)
-            avg_blur = diagnostics.get("avg_blur", 0.0)
-            image_count = diagnostics.get("image_count", 0)
+    logger.info("[config] Dataset intelligence loaded")
 
-            # ---- Feature extraction tuning ----
-            config["feature_extraction"]["max_num_features"] = max(
-                2000, int(avg_features * 1.1)
-            )
+    # =================================================
+    # Unpack intelligence (explicitly)
+    # =================================================
 
-            # ---- Force full resolution ----
-            config["dense_reconstruction"]["openmvs"]["resolution_level"] = 1
-            config["dense_reconstruction"]["openmvs"]["max_resolution"] = 2400
-            config["dense_reconstruction"]["colmap"]["max_image_size"] = 2400
+    img_count = intel["image_count"]
+    scale = intel["dataset_scale"]
 
-            # ---- Recommendations ----
-            recommendations = diagnostics.get("recommendations", [])
-            if avg_blur < 0.2:
-                recommendations.append(
-                    "Average blur is low; consider aggressive filtering"
-                )
+    blur_mean = intel["quality"]["blur"]["mean"]
+    blur_low_ratio = intel["quality"]["blur"]["low_ratio"]
 
-            if recommendations:
-                config["dataset_recommendations"] = recommendations
+    feat_mp = intel["features"]["mean_per_megapixel"]
+    low_feat_ratio = intel["features"]["low_density_ratio"]
 
-            logger.info(
-                f"[config] Applied diagnostics "
-                f"(images={image_count}, avg_features={avg_features})"
-            )
+    orphan_ratio = intel["overlap"]["orphan_ratio"]
+    mean_hamming = intel["overlap"]["mean_hamming_distance"]
 
-        except Exception as exc:
-            logger.warning(f"[config] Failed to apply diagnostics: {exc}")
+    aspect_std = intel["viewpoint"]["aspect_ratio_std"]
 
-    # -----------------------------------------
-    # Write config.yaml
-    # -----------------------------------------
+    logger.info(
+        "[config] Dataset summary | "
+        f"images={img_count}, scale={scale}, "
+        f"blur_mean={blur_mean:.1f}, "
+        f"feat/mp={feat_mp:.0f}, "
+        f"orphan_ratio={orphan_ratio:.2f}"
+    )
+
+    # =================================================
+    # FEATURE EXTRACTION POLICY
+    # =================================================
+
+    if feat_mp < 300:
+        config["feature_extraction"]["max_num_features"] = 12000
+        logger.info("[config] Low texture → increasing feature budget")
+
+    elif feat_mp > 1200:
+        config["feature_extraction"]["max_num_features"] = 6000
+        logger.info("[config] High texture → reducing redundant features")
+
+    # =================================================
+    # MATCHING POLICY (CRITICAL)
+    # =================================================
+
+    if scale in {"large", "massive"}:
+        config["matching"]["method"] = "sequential"
+        logger.info("[config] Large dataset → sequential matching enforced")
+
+    if orphan_ratio > 0.30 or (mean_hamming and mean_hamming > 22):
+        config["matching"]["method"] = "exhaustive"
+        config["matching"]["max_ratio"] = 0.75
+        logger.info("[config] Poor overlap detected → exhaustive + stricter ratio")
+
+    if blur_low_ratio > 0.4:
+        config["matching"]["max_distance"] = 0.65
+        logger.info("[config] High blur ratio → tightening descriptor distance")
+
+    # =================================================
+    # SPARSE RECONSTRUCTION POLICY
+    # =================================================
+
+    if blur_low_ratio > 0.4:
+        config["sparse_reconstruction"]["min_num_inliers"] = 20
+        config["sparse_reconstruction"]["min_inlier_ratio"] = 0.2
+        logger.info("[config] Blur-heavy dataset → stricter inlier thresholds")
+
+    if aspect_std < 0.05:
+        config["sparse_reconstruction"]["rotation_filtering_angle_threshold"] = 20
+        logger.info("[config] Low viewpoint diversity → stricter rotation filtering")
+
+    # =================================================
+    # DENSE RECONSTRUCTION POLICY
+    # =================================================
+
+    # MARK-2 rule: never downsample globally
+    config["dense_reconstruction"]["openmvs"]["resolution_level"] = 1
+
+    if scale in {"large", "massive"}:
+        config["dense_reconstruction"]["openmvs"]["dense_reuse_depth"] = True
+        logger.info("[config] Large dataset → depth reuse enabled")
+
+    # =================================================
+    # FAIL-SAFE FLAGS (NON-SILENT)
+    # =================================================
+
+    flags = intel.get("flags", [])
+    if flags:
+        config["dataset_flags"] = flags
+        logger.warning(f"[config] Dataset flags propagated: {flags}")
+
+    # =================================================
+    # WRITE CONFIG
+    # =================================================
+
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, sort_keys=False)
 
-    logger.info("[config] config.yaml written successfully")
+    logger.info(f"[config] config.yaml written: {config_path}")
+    logger.info("[config] MARK-2 adaptive config generation completed")
+
     return config
 
 
-# -------------------------------------------------
-# VALIDATION (LOGGER-INJECTED)
-# -------------------------------------------------
+# =================================================
+# VALIDATION
+# =================================================
 
 def validate_config(config: dict, logger) -> bool:
-    required_sections = [
+    required = {
         "camera",
         "feature_extraction",
         "matching",
         "sparse_reconstruction",
         "dense_reconstruction",
-    ]
+    }
 
-    for section in required_sections:
-        if section not in config:
-            logger.error(f"[config] Missing section: {section}")
-            return False
+    missing = required - config.keys()
+    if missing:
+        logger.error(f"[config] Missing required sections: {missing}")
+        return False
 
-    dense = config["dense_reconstruction"]
-    if dense.get("primary") not in {"OPENMVS", "COLMAP"}:
-        logger.error("[config] Invalid dense reconstruction primary backend")
+    if config["dense_reconstruction"]["primary"] != "OPENMVS":
+        logger.error("[config] MARK-2 requires OPENMVS as primary dense backend")
         return False
 
     logger.info("[config] Configuration validation passed")

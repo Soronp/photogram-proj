@@ -2,13 +2,12 @@
 """
 runner.py
 
-MARK-2 Pipeline Runner (Project-Scoped Runs with Output Symlink)
-----------------------------------------------------------------
-- All runs are stored under PROJECT_ROOT/runs/
-- Optional symlink in OUTPUT folder for quick access
-- Deterministic execution order
-- Resume-safe by outputs
-- Single logger per run
+MARK-2 Pipeline Runner (Authoritative)
+-------------------------------------
+- Runs are created under PROJECT_ROOT/runs/<run_id>
+- Exactly one logger per run
+- Deterministic stage execution
+- Resume-safe via checkpoints
 """
 
 import argparse
@@ -18,8 +17,8 @@ import traceback
 from pathlib import Path
 from typing import Callable, List, Tuple
 
-from utils.logger import get_logger
 from utils.paths import ProjectPaths
+from utils.logger import get_run_logger
 from runs.run_manager import RunManager
 
 # --------------------------------------------------
@@ -28,7 +27,7 @@ from runs.run_manager import RunManager
 from init import run as run_init
 from input import run as run_input
 from image_analyzer import run as run_image_analyzer
-from config_manager import create_runtime_config
+from config_manager import create_runtime_config, validate_config
 from filter import run as run_image_filter
 from pre_proc import run as run_preprocess
 from db_builder import run as run_db_builder
@@ -51,9 +50,9 @@ PipelineStage = Tuple[str, Callable | None]
 
 PIPELINE: List[PipelineStage] = [
     ("init", run_init),
-    ("input", None),  # special case
+    ("input", None),  # special handling
     ("image_analysis", run_image_analyzer),
-    ("config", lambda p, f, logger: create_runtime_config(p, logger)),
+    ("config", None),
     ("filter", run_image_filter),
     ("preprocess", run_preprocess),
     ("database", run_db_builder),
@@ -73,21 +72,29 @@ PIPELINE: List[PipelineStage] = [
 # --------------------------------------------------
 # Runner core
 # --------------------------------------------------
-def run_pipeline(project_root: Path, input_path: Path, force: bool, output_symlink: Path | None = None):
+def run_pipeline(
+    project_root: Path,
+    input_path: Path,
+    force: bool,
+    output_symlink: Path | None = None,
+):
     project_root = project_root.resolve()
     input_path = input_path.resolve()
 
-    # Initialize canonical project paths
+    # Canonical project layout
     paths = ProjectPaths(project_root)
     paths.ensure_all()
 
-    # Create persistent run directory under PROJECT_ROOT/runs/
+    # --------------------------------------------------
+    # Create run
+    # --------------------------------------------------
     run_manager = RunManager(paths)
     run_ctx = run_manager.start_run(project_root, input_path)
-    run_log_dir = run_ctx.logs  # PROJECT_ROOT/runs/<run_id>/logs
 
-    # Single logger for entire run
-    logger = get_logger("run", log_root=run_log_dir)
+    # --------------------------------------------------
+    # Initialize SINGLE run logger
+    # --------------------------------------------------
+    logger = get_run_logger(run_ctx.run_id, run_ctx.logs)
 
     logger.info("=== MARK-2 PIPELINE STARTED ===")
     logger.info(f"Run ID       : {run_ctx.run_id}")
@@ -101,21 +108,23 @@ def run_pipeline(project_root: Path, input_path: Path, force: bool, output_symli
     try:
         for idx, (stage_name, stage_fn) in enumerate(PIPELINE, start=1):
             stage_start = time.time()
-            print(f"[STAGE_START] {idx}/{total_stages} {stage_name}", flush=True)
             logger.info(f"[{stage_name}] START")
 
-            # Skip if checkpoint exists and force is not enabled
             if run_ctx.stage_done(stage_name) and not force:
                 logger.info(f"[{stage_name}] SKIPPED (checkpoint)")
-                print(f"[STAGE_SKIP] {idx}/{total_stages} {stage_name}", flush=True)
                 continue
 
             try:
-                # Special input stage handling
                 if stage_name == "input":
                     run_input(project_root, input_path, force, logger)
+
+                elif stage_name == "config":
+                    config = create_runtime_config(run_ctx.root, project_root, logger)
+                    if not validate_config(config, logger):
+                        raise RuntimeError("Configuration validation failed")
+
                 elif stage_fn is not None:
-                    stage_fn(project_root, force, logger)
+                    stage_fn(run_ctx.root, project_root, force, logger)
 
                 run_ctx.mark_stage(stage_name, "done")
 
@@ -126,37 +135,37 @@ def run_pipeline(project_root: Path, input_path: Path, force: bool, output_symli
 
             elapsed = time.time() - stage_start
             logger.info(f"[{stage_name}] DONE in {elapsed:.2f}s")
-            print(f"[STAGE_DONE] {idx}/{total_stages} {stage_name} ({elapsed:.2f}s)", flush=True)
 
         total_elapsed = time.time() - pipeline_start
         logger.info(f"PIPELINE SUCCESS ({total_elapsed:.2f}s)")
         run_manager.finish_run(success=True)
 
         # --------------------------------------------------
-        # Optional symlink creation in output folder
+        # Optional output symlink
         # --------------------------------------------------
         if output_symlink:
             try:
                 if output_symlink.exists() or output_symlink.is_symlink():
                     output_symlink.unlink()
-                output_symlink.symlink_to(run_ctx.run_dir, target_is_directory=True)
-                logger.info(f"Symlink created at {output_symlink} -> {run_ctx.run_dir}")
+                output_symlink.symlink_to(run_ctx.root, target_is_directory=True)
+                logger.info(f"Symlink created: {output_symlink} -> {run_ctx.root}")
             except Exception as e:
-                logger.warning(f"Could not create symlink at {output_symlink}: {e}")
+                logger.warning(f"Symlink creation failed: {e}")
 
     except Exception:
         run_manager.finish_run(success=False)
         raise
+
 
 # --------------------------------------------------
 # CLI
 # --------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="MARK-2 Pipeline Runner")
-    parser.add_argument("--input", type=Path, help="Input data directory")
-    parser.add_argument("--project_root", type=Path, help="Project root directory (canonical)")
-    parser.add_argument("--output", type=Path, help="Optional output folder for symlink")
-    parser.add_argument("--force", action="store_true", help="Force re-run of stages")
+    parser.add_argument("--input", type=Path)
+    parser.add_argument("--project_root", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
     input_path = args.input or Path(input("Enter input path: ").strip())
@@ -168,17 +177,16 @@ def main():
         sys.exit(1)
 
     project_root.mkdir(parents=True, exist_ok=True)
-    if output_symlink:
-        output_symlink.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         run_pipeline(project_root, input_path, args.force, output_symlink)
     except KeyboardInterrupt:
-        print("\nPipeline interrupted by user")
+        print("\nPipeline interrupted")
         sys.exit(130)
     except Exception as exc:
         print(f"\nPipeline failed: {exc}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

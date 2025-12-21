@@ -24,7 +24,7 @@ from utils.config import load_config
 # --------------------------------------------------
 # PIPELINE STAGE
 # --------------------------------------------------
-def run(project_root: Path, force: bool, logger):
+def run(run_root: Path, project_root: Path, force: bool, logger):
     paths = ProjectPaths(project_root)
     load_config(project_root)
 
