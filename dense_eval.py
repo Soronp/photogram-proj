@@ -22,7 +22,7 @@ from utils.config import load_config
 # --------------------------------------------------
 def run(run_root: Path, project_root: Path, force: bool, logger):
     paths = ProjectPaths(project_root)
-    _ = load_config(project_root)  # reserved for thresholds
+    _ = load_config(run_root)
 
     dense_ply = paths.dense / "fused.ply"
     eval_dir = paths.evaluation

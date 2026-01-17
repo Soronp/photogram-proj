@@ -32,7 +32,7 @@ from filter import run as run_image_filter
 from pre_proc import run as run_preprocess
 from db_builder import run as run_db_builder
 from matcher import run as run_matcher
-from sparse_reconstruction import run_sparse
+from sparse_reconstruction import run as run_sparse
 from sparse_eval import run as run_sparse_eval
 from openmvs_export import run as run_openmvs_export
 from dense_reconstruction import run as run_dense
@@ -46,11 +46,11 @@ from vis import run as run_visualization
 # --------------------------------------------------
 # Pipeline definition
 # --------------------------------------------------
-PipelineStage = Tuple[str, Callable | None]
+PipelineStage = Tuple[str, Callable]
 
 PIPELINE: List[PipelineStage] = [
     ("init", run_init),
-    ("input", None),  # special handling
+    ("input", None),
     ("image_analysis", run_image_analyzer),
     ("config", None),
     ("filter", run_image_filter),
@@ -81,19 +81,12 @@ def run_pipeline(
     project_root = project_root.resolve()
     input_path = input_path.resolve()
 
-    # Canonical project layout
     paths = ProjectPaths(project_root)
     paths.ensure_all()
 
-    # --------------------------------------------------
-    # Create run
-    # --------------------------------------------------
     run_manager = RunManager(paths)
     run_ctx = run_manager.start_run(project_root, input_path)
 
-    # --------------------------------------------------
-    # Initialize SINGLE run logger
-    # --------------------------------------------------
     logger = get_run_logger(run_ctx.run_id, run_ctx.logs)
 
     logger.info("=== MARK-2 PIPELINE STARTED ===")
@@ -102,12 +95,10 @@ def run_pipeline(
     logger.info(f"Input path   : {input_path}")
     logger.info(f"Force        : {force}")
 
-    total_stages = len(PIPELINE)
     pipeline_start = time.time()
 
     try:
-        for idx, (stage_name, stage_fn) in enumerate(PIPELINE, start=1):
-            stage_start = time.time()
+        for stage_name, stage_fn in PIPELINE:
             logger.info(f"[{stage_name}] START")
 
             if run_ctx.stage_done(stage_name) and not force:
@@ -123,7 +114,7 @@ def run_pipeline(
                     if not validate_config(config, logger):
                         raise RuntimeError("Configuration validation failed")
 
-                elif stage_fn is not None:
+                else:
                     stage_fn(run_ctx.root, project_root, force, logger)
 
                 run_ctx.mark_stage(stage_name, "done")
@@ -133,16 +124,11 @@ def run_pipeline(
                 logger.error(traceback.format_exc())
                 raise
 
-            elapsed = time.time() - stage_start
-            logger.info(f"[{stage_name}] DONE in {elapsed:.2f}s")
+            logger.info(f"[{stage_name}] DONE")
 
-        total_elapsed = time.time() - pipeline_start
-        logger.info(f"PIPELINE SUCCESS ({total_elapsed:.2f}s)")
+        logger.info(f"PIPELINE SUCCESS ({time.time() - pipeline_start:.2f}s)")
         run_manager.finish_run(success=True)
 
-        # --------------------------------------------------
-        # Optional output symlink
-        # --------------------------------------------------
         if output_symlink:
             try:
                 if output_symlink.exists() or output_symlink.is_symlink():

@@ -26,7 +26,7 @@ from utils.config import load_config
 # --------------------------------------------------
 def run(run_root: Path, project_root: Path, force: bool, logger):
     paths = ProjectPaths(project_root)
-    load_config(project_root)
+    load_config(run_root)
 
     vis_dir = paths.visualization
     mesh_path = paths.mesh / "mesh_cleaned.ply"

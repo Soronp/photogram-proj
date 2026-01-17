@@ -2,12 +2,13 @@
 """
 input.py
 
-MARK-2 Input Ingestion Stage (Modern)
--------------------------------------
-- Copies images → images_processed/
-- Copies videos → videos/
-- Extracts frames deterministically
-- Accepts logger for pipeline parity
+MARK-2 Input Ingestion Stage
+---------------------------
+Responsibilities:
+- Copy images into images_processed/
+- Copy videos into videos/
+- Deterministically extract frames from videos
+- Pipeline-safe logging
 """
 
 from pathlib import Path
@@ -20,7 +21,10 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv"}
 
 
-def extract_video_frames(video: Path, out_dir: Path, fps: int = 2, logger=None):
+# --------------------------------------------------
+# Video Frame Extraction
+# --------------------------------------------------
+def extract_video_frames(video: Path, out_dir: Path, fps: int, logger=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     pattern = out_dir / f"{video.stem}_frame_%06d.jpg"
 
@@ -31,11 +35,8 @@ def extract_video_frames(video: Path, out_dir: Path, fps: int = 2, logger=None):
         str(pattern),
     ]
 
-    msg = f"[input] Extracting frames from {video.name} → {out_dir}"
-    if logger:
-        logger.info(msg)
-    else:
-        print(msg)
+    msg = f"[input] Extracting frames: {video.name} → {out_dir}"
+    logger.info(msg) if logger else print(msg)
 
     proc = subprocess.run(
         cmd,
@@ -45,15 +46,15 @@ def extract_video_frames(video: Path, out_dir: Path, fps: int = 2, logger=None):
     )
 
     if proc.stdout.strip():
-        if logger:
-            logger.info(proc.stdout)
-        else:
-            print(proc.stdout)
+        logger.info(proc.stdout) if logger else print(proc.stdout)
 
     if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg failed for {video.name}")
+        raise RuntimeError(f"FFmpeg extraction failed: {video.name}")
 
 
+# --------------------------------------------------
+# Pipeline Stage
+# --------------------------------------------------
 def run(project_root: Path, input_path: Path, force: bool, logger=None):
     project_root = project_root.resolve()
     input_path = input_path.resolve()
@@ -61,19 +62,18 @@ def run(project_root: Path, input_path: Path, force: bool, logger=None):
     paths = ProjectPaths(project_root)
     paths.ensure_all()
 
-    if not input_path.exists() or not input_path.is_dir():
+    if not input_path.is_dir():
         raise RuntimeError(f"Invalid input directory: {input_path}")
+
+    logger.info("[input] Starting ingestion") if logger else print("[input] Starting ingestion")
 
     copied_images = 0
     copied_videos = 0
 
-    msg = "[input] Starting input ingestion"
-    if logger:
-        logger.info(msg)
-    else:
-        print(msg)
-
     for item in sorted(input_path.iterdir()):
+        if not item.is_file():
+            continue
+
         ext = item.suffix.lower()
 
         if ext in IMAGE_EXTS:
@@ -91,35 +91,31 @@ def run(project_root: Path, input_path: Path, force: bool, logger=None):
             copied_videos += 1
 
     msg = f"[input] Copied images: {copied_images}, videos: {copied_videos}"
-    if logger:
-        logger.info(msg)
-    else:
-        print(msg)
+    logger.info(msg) if logger else print(msg)
 
-    # Extract frames from all videos in the videos folder
+    # Deterministic frame extraction
     for video in sorted(paths.videos.iterdir()):
         if video.suffix.lower() in VIDEO_EXTS:
             extract_video_frames(video, paths.images_processed, fps=2, logger=logger)
 
     total_images = len(list(paths.images_processed.glob("*.jpg")))
     if total_images == 0:
-        raise RuntimeError("No images available after ingestion")
+        raise RuntimeError("[input] No images available after ingestion")
 
     msg = f"[input] Total images ready: {total_images}"
-    if logger:
-        logger.info(msg)
-    else:
-        print(msg)
+    logger.info(msg) if logger else print(msg)
 
 
-# --- CLI entrypoint ---
+# --------------------------------------------------
+# CLI Entrypoint
+# --------------------------------------------------
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="MARK-2 Input Ingestion")
     parser.add_argument("--project", required=True, help="Project root directory")
     parser.add_argument("--input", required=True, help="Input directory")
-    parser.add_argument("--force", action="store_true", help="Force re-ingest")
+    parser.add_argument("--force", action="store_true", help="Force re-ingestion")
     args = parser.parse_args()
 
     run(Path(args.project), Path(args.input), args.force)

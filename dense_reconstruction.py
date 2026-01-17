@@ -1,16 +1,8 @@
-#!/usr/bin/env python3
-"""
-dense_reconstruction.py
-
-MARK-2 Dense Reconstruction Stage (OpenMVS)
--------------------------------------------
-Runner-managed, deterministic, non-interactive.
-"""
-
-import subprocess
 from pathlib import Path
 
 from utils.paths import ProjectPaths
+from config_manager import create_runtime_config, validate_config
+from tool_runner import ToolRunner
 
 
 # --------------------------------------------------
@@ -22,6 +14,18 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
 
     logger.info("[dense] Stage started (OpenMVS)")
 
+    # --------------------------------------------------
+    # CONFIG
+    # --------------------------------------------------
+    config = create_runtime_config(run_root, project_root, logger)
+    if not validate_config(config, logger):
+        raise RuntimeError("Invalid configuration")
+
+    tool = ToolRunner(config, logger)
+
+    # --------------------------------------------------
+    # INPUT VALIDATION
+    # --------------------------------------------------
     openmvs_root = paths.openmvs
     scene_file = openmvs_root / "scene.mvs"
     undistorted_dir = openmvs_root / "undistorted"
@@ -39,27 +43,28 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
         logger.info("[dense] Output exists — skipping")
         return
 
-    cmd = [
-        "DensifyPointCloud",
-        "-i", str(scene_file),
-        "-o", str(fused_file),
-        "--working-folder", str(openmvs_root),
-        "--resolution-level", "1",
-        "--max-resolution", "2560",
-        "--min-resolution", "640",
-        "--number-views", "8",
-        "--number-views-fuse", "3",
-        "--estimate-colors", "2",
-        "--estimate-normals", "2",
-        "--filter-point-cloud", "1",
-    ]
+    dense_cfg = config["dense_reconstruction"]["openmvs"]
 
-    logger.info("[dense] RUN: DensifyPointCloud")
-    logger.info(" ".join(cmd))
-
-    result = subprocess.run(cmd)
-    if result.returncode != 0:
-        raise RuntimeError("DensifyPointCloud failed")
+    # --------------------------------------------------
+    # DENSIFY POINT CLOUD
+    # --------------------------------------------------
+    tool.run(
+        tool="densify",  # ToolRunner resolves to DensifyPointCloud executable
+        args=[
+            "-i", str(scene_file),
+            "-o", str(fused_file),
+            "--working-folder", str(openmvs_root),
+            "--resolution-level", str(dense_cfg.get("resolution_level", 1)),
+            "--max-resolution", str(dense_cfg.get("max_resolution", 2560)),
+            "--min-resolution", str(dense_cfg.get("min_resolution", 640)),
+            "--number-views", str(dense_cfg.get("number_views", 8)),
+            "--number-views-fuse", str(dense_cfg.get("number_views_fuse", 3)),
+            "--estimate-colors", str(dense_cfg.get("estimate_colors", 2)),
+            "--estimate-normals", str(dense_cfg.get("estimate_normals", 2)),
+            "--filter-point-cloud", str(dense_cfg.get("filter_point_cloud", 1)),
+        ],
+        cwd=openmvs_root,
+    )
 
     logger.info(f"[dense] Output written: {fused_file}")
     logger.info("[dense] Stage completed")

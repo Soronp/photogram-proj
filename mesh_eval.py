@@ -30,7 +30,7 @@ DEGENERATE_EPS = 1e-12
 # -----------------------------
 def run(run_root: Path, project_root: Path, force: bool, logger):
     paths = ProjectPaths(project_root)
-    _ = load_config(project_root)
+    _ = load_config(run_root)  # reserved for thresholds
 
     mesh_in = paths.mesh / "mesh_cleaned.ply"
     metrics_out = paths.evaluation / "mesh_metrics.json"

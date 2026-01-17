@@ -2,11 +2,12 @@
 """
 matcher_dynamic.py
 
-MARK-2 Exhaustive Matching (Canonical)
--------------------------------------
-- Runner-managed logger
-- Resume-safe, force-aware
-- Generates matching report
+MARK-2 Exhaustive Matching Stage
+--------------------------------
+Responsibilities:
+- Resume-safe COLMAP exhaustive matching
+- Force-aware database cleanup
+- Matching quality assessment + report generation
 """
 
 import subprocess
@@ -20,7 +21,7 @@ from config_manager import create_runtime_config, validate_config
 
 
 # --------------------------------------------------
-# Helpers
+# Command Runner
 # --------------------------------------------------
 def run_command(cmd, logger, label: str):
     logger.info(f"[matcher] RUN: {label}")
@@ -33,41 +34,52 @@ def run_command(cmd, logger, label: str):
         text=True,
     )
 
-    logger.info(proc.stdout)
+    if proc.stdout.strip():
+        logger.info(proc.stdout)
+
     if proc.returncode != 0:
-        raise RuntimeError(f"{label} failed")
+        raise RuntimeError(f"[matcher] {label} failed")
 
 
-def match_stats(db: Path, logger):
-    conn = sqlite3.connect(db)
+# --------------------------------------------------
+# Matching Statistics
+# --------------------------------------------------
+def collect_match_stats(database: Path, logger):
+    conn = sqlite3.connect(database)
     cur = conn.cursor()
 
     cur.execute("SELECT COUNT(*) FROM images")
-    imgs = cur.fetchone()[0]
+    image_count = cur.fetchone()[0]
 
     cur.execute("SELECT COUNT(*) FROM matches")
-    pairs = cur.fetchone()[0]
+    pair_count = cur.fetchone()[0]
 
     cur.execute("SELECT LENGTH(data) FROM matches WHERE LENGTH(data) > 150")
-    strong = len(cur.fetchall())
+    strong_matches = len(cur.fetchall())
 
     conn.close()
 
-    expected = comb(imgs, 2) if imgs >= 2 else 0
-    coverage = (strong / pairs * 100) if pairs else 0.0
+    expected_pairs = comb(image_count, 2) if image_count >= 2 else 0
+    coverage = (strong_matches / pair_count * 100) if pair_count else 0.0
 
-    logger.info(f"[matcher] Images: {imgs}, Pairs: {pairs}, Good matches: {strong}, Coverage: {coverage:.2f}%")
+    logger.info(
+        f"[matcher] Images: {image_count}, "
+        f"Pairs: {pair_count}, "
+        f"Strong matches: {strong_matches}, "
+        f"Coverage: {coverage:.2f}%"
+    )
+
     return {
-        "images": imgs,
-        "match_pairs": pairs,
-        "expected_pairs": expected,
-        "good_matches": strong,
+        "images": image_count,
+        "match_pairs": pair_count,
+        "expected_pairs": expected_pairs,
+        "good_matches": strong_matches,
         "coverage_percent": coverage,
     }
 
 
 # --------------------------------------------------
-# Pipeline stage
+# Pipeline Stage
 # --------------------------------------------------
 def run(run_root: Path, project_root: Path, force: bool, logger):
     paths = ProjectPaths(project_root)
@@ -75,16 +87,16 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
 
     logger.info("[matcher] Starting exhaustive matching")
 
-    # Load and validate config
+    # Load runtime configuration
     config = create_runtime_config(run_root, project_root, logger)
     validate_config(config, logger)
 
     db = paths.database / "database.db"
     if not db.exists():
-        raise FileNotFoundError(db)
+        raise FileNotFoundError(f"[matcher] Missing database: {db}")
 
     if force:
-        logger.info("[matcher] Force enabled — clearing matches")
+        logger.info("[matcher] Force enabled — clearing previous matches")
         conn = sqlite3.connect(db)
         cur = conn.cursor()
         cur.execute("DELETE FROM matches")
@@ -92,7 +104,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
         conn.commit()
         conn.close()
 
-    # Run COLMAP exhaustive matcher
+    # COLMAP exhaustive matcher
     run_command(
         [
             "colmap", "exhaustive_matcher",
@@ -103,11 +115,11 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
             "--TwoViewGeometry.max_error", "2.0",
         ],
         logger,
-        "Exhaustive Matching"
+        "Exhaustive Matching",
     )
 
-    # Collect statistics
-    stats = match_stats(db, logger)
+    # Assessment
+    stats = collect_match_stats(db, logger)
     assessment = "good" if stats["coverage_percent"] >= 55 else "poor"
 
     report = {
@@ -119,5 +131,5 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     report_path = paths.database / "matching_report.json"
     report_path.write_text(json.dumps(report, indent=2))
 
-    logger.info(f"[matcher] Matching report written: {report_path}")
-    logger.info("[matcher] Matching complete")
+    logger.info(f"[matcher] Report written: {report_path}")
+    logger.info("[matcher] Matching stage complete")

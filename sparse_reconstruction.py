@@ -2,12 +2,13 @@
 """
 sparse_reconstruction.py
 
-MARK-2 Sparse Reconstruction (Authoritative)
----------------------------------------------
-- Runs COLMAP mapper
-- Selects best sparse model deterministically
-- Physically enforces ONE active sparse model
-- Writes export_ready.json (single source of truth)
+MARK-2 Sparse Reconstruction Stage (Canonical)
+----------------------------------------------
+Responsibilities:
+- Run COLMAP mapper
+- Deterministically select best sparse model
+- Enforce single-sparse invariant
+- Emit export_ready.json (authoritative handoff)
 - Runner-managed logger
 """
 
@@ -20,26 +21,57 @@ from pathlib import Path
 from utils.paths import ProjectPaths
 from utils.config import load_config, COLMAP_EXE
 
+REQUIRED_FILES = {"cameras.bin", "images.bin", "points3D.bin"}
 
-REQUIRED = {"cameras.bin", "images.bin", "points3D.bin"}
 
-
+# --------------------------------------------------
+# Helpers
+# --------------------------------------------------
 def hash_sparse(model_dir: Path) -> str:
+    """
+    Stable content hash for sparse model identity.
+    """
     h = hashlib.sha256()
-    for name in sorted(REQUIRED):
+    for name in sorted(REQUIRED_FILES):
         h.update((model_dir / name).read_bytes())
     return h.hexdigest()
 
 
-def run_sparse(run_root: Path, project_root: Path, force: bool, logger):
-    project_root = Path(project_root).resolve()
-    load_config(project_root)
+def run_command(cmd, logger, label: str):
+    logger.info(f"[sparse] RUN: {label}")
+    logger.info(" ".join(map(str, cmd)))
+
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    if proc.stdout.strip():
+        logger.info(proc.stdout)
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"[sparse] {label} failed")
+
+
+# --------------------------------------------------
+# Pipeline Stage
+# --------------------------------------------------
+def run(run_root: Path, project_root: Path, force: bool, logger):
+    project_root = project_root.resolve()
+
+    # Run-scoped immutable config
+    load_config(run_root)
 
     paths = ProjectPaths(project_root)
     paths.ensure_all()
 
-    logger.info("[sparse] Starting sparse reconstruction")
+    logger.info("[sparse] Stage started")
 
+    # --------------------------------------------------
+    # Reset sparse directory (force-aware)
+    # --------------------------------------------------
     if paths.sparse.exists() and force:
         logger.info("[sparse] Force enabled — removing existing sparse/")
         shutil.rmtree(paths.sparse)
@@ -49,51 +81,58 @@ def run_sparse(run_root: Path, project_root: Path, force: bool, logger):
     # --------------------------------------------------
     # COLMAP mapper
     # --------------------------------------------------
-    cmd = [
-        COLMAP_EXE, "mapper",
-        "--database_path", paths.database / "database.db",
-        "--image_path", paths.images_processed,
-        "--output_path", paths.sparse,
-    ]
-
-    logger.info("[sparse] Running COLMAP mapper")
-    subprocess.run(cmd, check=True)
+    run_command(
+        [
+            COLMAP_EXE, "mapper",
+            "--database_path", paths.database / "database.db",
+            "--image_path", paths.images_processed,
+            "--output_path", paths.sparse,
+        ],
+        logger,
+        label="COLMAP Mapper",
+    )
 
     # --------------------------------------------------
     # Collect valid sparse models
     # --------------------------------------------------
-    models = []
-    for d in sorted(paths.sparse.iterdir()):
-        if d.is_dir() and REQUIRED.issubset({f.name for f in d.iterdir()}):
-            models.append(d)
+    models = sorted(
+        d for d in paths.sparse.iterdir()
+        if d.is_dir() and REQUIRED_FILES.issubset({f.name for f in d.iterdir()})
+    )
 
     if not models:
-        raise RuntimeError("No valid sparse models produced")
+        raise RuntimeError("[sparse] No valid sparse models produced")
 
     # --------------------------------------------------
-    # Select best model (largest points3D.bin)
+    # Deterministic selection
+    # Strategy: largest points3D.bin
     # --------------------------------------------------
-    best = max(models, key=lambda d: (d / "points3D.bin").stat().st_size)
-    logger.info(f"[sparse] Selected model: {best.name}")
+    best_model = max(
+        models,
+        key=lambda d: (d / "points3D.bin").stat().st_size,
+    )
+
+    logger.info(f"[sparse] Selected model: {best_model.name}")
 
     # --------------------------------------------------
-    # Enforce single-sparse invariant
+    # Enforce single-model invariant
     # --------------------------------------------------
     for d in models:
-        if d != best:
+        if d != best_model:
             shutil.rmtree(d)
 
     # --------------------------------------------------
-    # Write authoritative metadata
+    # Authoritative export metadata
     # --------------------------------------------------
     meta = {
-        "model_dir": best.name,
+        "model_dir": best_model.name,
         "format": "COLMAP",
-        "sparse_hash": hash_sparse(best),
+        "sparse_hash": hash_sparse(best_model),
         "ready_for_openmvs": True,
     }
 
     meta_path = paths.sparse / "export_ready.json"
     meta_path.write_text(json.dumps(meta, indent=2))
 
-    logger.info("[sparse] Sparse reconstruction finalized")
+    logger.info("[sparse] export_ready.json written")
+    logger.info("[sparse] Stage completed successfully")
