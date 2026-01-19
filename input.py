@@ -4,11 +4,9 @@ input.py
 
 MARK-2 Input Ingestion Stage
 ---------------------------
-Responsibilities:
 - Copy images into images_processed/
 - Copy videos into videos/
-- Deterministically extract frames from videos
-- Pipeline-safe logging
+- Deterministic frame extraction
 """
 
 from pathlib import Path
@@ -21,13 +19,10 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv"}
 
 
-# --------------------------------------------------
-# Video Frame Extraction
-# --------------------------------------------------
-def extract_video_frames(video: Path, out_dir: Path, fps: int, logger=None):
+def extract_video_frames(video: Path, out_dir: Path, fps: int, logger):
     out_dir.mkdir(parents=True, exist_ok=True)
-    pattern = out_dir / f"{video.stem}_frame_%06d.jpg"
 
+    pattern = out_dir / f"{video.stem}_frame_%06d.jpg"
     cmd = [
         "ffmpeg", "-y",
         "-i", str(video),
@@ -35,8 +30,7 @@ def extract_video_frames(video: Path, out_dir: Path, fps: int, logger=None):
         str(pattern),
     ]
 
-    msg = f"[input] Extracting frames: {video.name} → {out_dir}"
-    logger.info(msg) if logger else print(msg)
+    logger.info(f"[input] Extracting frames from {video.name}")
 
     proc = subprocess.run(
         cmd,
@@ -46,16 +40,13 @@ def extract_video_frames(video: Path, out_dir: Path, fps: int, logger=None):
     )
 
     if proc.stdout.strip():
-        logger.info(proc.stdout) if logger else print(proc.stdout)
+        logger.debug(proc.stdout)
 
     if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg extraction failed: {video.name}")
+        raise RuntimeError(f"[input] FFmpeg failed for {video.name}")
 
 
-# --------------------------------------------------
-# Pipeline Stage
-# --------------------------------------------------
-def run(project_root: Path, input_path: Path, force: bool, logger=None):
+def run(run_root: Path, project_root: Path, force: bool, logger, *, input_path: Path):
     project_root = project_root.resolve()
     input_path = input_path.resolve()
 
@@ -63,9 +54,9 @@ def run(project_root: Path, input_path: Path, force: bool, logger=None):
     paths.ensure_all()
 
     if not input_path.is_dir():
-        raise RuntimeError(f"Invalid input directory: {input_path}")
+        raise RuntimeError(f"[input] Invalid input directory: {input_path}")
 
-    logger.info("[input] Starting ingestion") if logger else print("[input] Starting ingestion")
+    logger.info("[input] Starting ingestion")
 
     copied_images = 0
     copied_videos = 0
@@ -90,10 +81,8 @@ def run(project_root: Path, input_path: Path, force: bool, logger=None):
             shutil.copy2(item, dst)
             copied_videos += 1
 
-    msg = f"[input] Copied images: {copied_images}, videos: {copied_videos}"
-    logger.info(msg) if logger else print(msg)
+    logger.info(f"[input] Copied {copied_images} images, {copied_videos} videos")
 
-    # Deterministic frame extraction
     for video in sorted(paths.videos.iterdir()):
         if video.suffix.lower() in VIDEO_EXTS:
             extract_video_frames(video, paths.images_processed, fps=2, logger=logger)
@@ -102,20 +91,5 @@ def run(project_root: Path, input_path: Path, force: bool, logger=None):
     if total_images == 0:
         raise RuntimeError("[input] No images available after ingestion")
 
-    msg = f"[input] Total images ready: {total_images}"
-    logger.info(msg) if logger else print(msg)
-
-
-# --------------------------------------------------
-# CLI Entrypoint
-# --------------------------------------------------
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="MARK-2 Input Ingestion")
-    parser.add_argument("--project", required=True, help="Project root directory")
-    parser.add_argument("--input", required=True, help="Input directory")
-    parser.add_argument("--force", action="store_true", help="Force re-ingestion")
-    args = parser.parse_args()
-
-    run(Path(args.project), Path(args.input), args.force)
+    logger.info(f"[input] Total images ready: {total_images}")
+    logger.info("[input] Stage completed")

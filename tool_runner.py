@@ -2,22 +2,20 @@
 """
 tool_runner.py
 
-MARK-2 Tool Execution Authority (Fixed)
----------------------------------------
-- Pulls executables from utils/config.py
-- Supports OpenMVS aliases
-- Absolute paths bypass PATH check
-- GPU/CPU selection per tool
-- Centralized logging and dry-run
+MARK-2 Tool Execution Authority (Canonical)
+------------------------------------------
+- Sole executor for all external tools
+- GPU controlled via environment (COLMAP-correct)
+- No hardcoded subcommand flags
+- Deterministic, logged, dry-run capable
 """
 
 import subprocess
 import time
+import os
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Optional
 from shutil import which
-
-from utils.config import COLMAP_EXE, GLOMAP_EXE, OPENMVS_TOOLS, validate_executables
 
 
 class ToolExecutionError(RuntimeError):
@@ -26,70 +24,55 @@ class ToolExecutionError(RuntimeError):
 
 class ToolRunner:
     """
-    Centralized tool executor for MARK-2 pipelines.
+    Centralized executor for all external tools.
     """
-
-    GPU_FLAGS = {
-        "feature_extractor": [],  # COLMAP CPU-only
-        "exhaustive_matcher": ["--SiftMatching.use_gpu", "1"],
-        "sequential_matcher": ["--SiftMatching.use_gpu", "1"],
-        "mapper": ["--Mapper.use_gpu", "1"],
-        "patch_match_stereo": ["--PatchMatchStereo.use_gpu", "1"],
-        "stereo_fusion": ["--StereoFusion.use_gpu", "1"],
-    }
-
-    DEFAULT_EXECUTABLES = {
-        "colmap": COLMAP_EXE,
-        "glomap": GLOMAP_EXE,
-        "interface_colmap": OPENMVS_TOOLS["interface_colmap"],
-        "densify": OPENMVS_TOOLS["densify"],
-        "mesh": OPENMVS_TOOLS["mesh"],
-        "texture": OPENMVS_TOOLS["texture"],
-    }
-
-    ALIASES = {
-        "openmvs": "densify",
-    }
 
     def __init__(self, config: dict, logger):
         self.config = config
         self.logger = logger
-        self.exec_cfg = config.get("execution", {})
+        self.exec_cfg = config["execution"]
+        self.tools_cfg = config["tools"]
 
-        # Validate all tools that are simple command names (not absolute paths)
-        validate_executables()
+        self._validate_tools()
 
-    # -------------------------
+    # --------------------------------------------------
     # Core runner
-    # -------------------------
+    # --------------------------------------------------
+
     def run(
         self,
         tool: str,
         args: List[str],
         cwd: Optional[Path] = None,
-        env: Optional[Dict[str, str]] = None,
         check: bool = True,
     ):
-        exe_path = self._resolve_executable(tool)
-        cmd = [exe_path] + args
+        exe = self._resolve_executable(tool)
+        cmd = [exe] + [str(a) for a in args]
 
-        # Append GPU flags if enabled
-        if self.exec_cfg.get("use_gpu", True):
-            gpu_flags = self.GPU_FLAGS.get(tool.lower(), [])
-            cmd += gpu_flags
+        env = os.environ.copy()
 
-        cmd_str = " ".join(map(str, cmd))
+        # --------------------------------------------------
+        # GPU policy (CORRECT for COLMAP & OpenMVS)
+        # --------------------------------------------------
+        if not self.exec_cfg.get("use_gpu", True):
+            env["CUDA_VISIBLE_DEVICES"] = ""
+            self.logger.debug("[tool] GPU disabled via CUDA_VISIBLE_DEVICES")
+        else:
+            # Respect user environment; do not inject flags
+            env.setdefault("CUDA_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES", ""))
+
+        cmd_str = " ".join(cmd)
         self.logger.info(f"[tool:{tool}] CMD: {cmd_str}")
 
         if self.exec_cfg.get("dry_run", False):
             self.logger.info(f"[tool:{tool}] DRY RUN — skipped")
-            return
+            return None
 
         start = time.time()
         try:
             proc = subprocess.run(
                 cmd,
-                cwd=cwd,
+                cwd=str(cwd) if cwd else None,
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -98,45 +81,65 @@ class ToolRunner:
             )
         except subprocess.CalledProcessError as e:
             self.logger.error(f"[tool:{tool}] FAILED")
-            self.logger.error(e.stdout)
+            if e.stdout:
+                self.logger.error(e.stdout)
             raise ToolExecutionError(cmd_str) from e
 
         elapsed = time.time() - start
         self.logger.info(f"[tool:{tool}] DONE in {elapsed:.2f}s")
 
-        if proc.stdout.strip():
+        if proc.stdout and proc.stdout.strip():
             self.logger.debug(proc.stdout)
 
         return proc
 
-    # -------------------------
-    # Tool resolution
-    # -------------------------
+    # --------------------------------------------------
+    # Executable resolution
+    # --------------------------------------------------
+
     def _resolve_executable(self, tool: str) -> str:
-        """
-        Resolve executable for a given tool.
-        Absolute paths are used directly.
-        """
-        tool_key = self.ALIASES.get(tool.lower(), tool.lower())
+        tool = tool.lower()
 
-        # Check config overrides first
-        tools_config = self.config.get("tools", {})
-        if tool_key in tools_config:
-            entry = tools_config[tool_key]
-            exe_path = entry.get("executable") if isinstance(entry, dict) else entry
+        if tool in self.tools_cfg:
+            entry = self.tools_cfg[tool]
+            exe = entry["executable"] if isinstance(entry, dict) else entry
+        elif "openmvs" in self.tools_cfg and tool in self.tools_cfg["openmvs"]:
+            exe = self.tools_cfg["openmvs"][tool]
         else:
-            exe_path = self.DEFAULT_EXECUTABLES.get(tool_key, tool_key)
+            raise KeyError(f"Tool '{tool}' not defined in config")
 
-        exe_path = str(exe_path)  # ensure string
-        exe_path_obj = Path(exe_path)
+        exe = str(exe)
+        p = Path(exe)
 
-        # If relative (not absolute), check PATH
-        if not exe_path_obj.is_absolute():
-            if which(exe_path) is None:
-                raise FileNotFoundError(f"Executable for {tool} not found on PATH: {exe_path}")
-        # If absolute, just make sure the file exists
+        if p.is_absolute():
+            if not p.exists():
+                raise FileNotFoundError(f"Executable not found: {exe}")
         else:
-            if not exe_path_obj.exists():
-                raise FileNotFoundError(f"Executable for {tool} not found at: {exe_path}")
+            if which(exe) is None:
+                raise FileNotFoundError(f"Executable not on PATH: {exe}")
 
-        return exe_path
+        return exe
+
+    # --------------------------------------------------
+    # Validation
+    # --------------------------------------------------
+
+    def _validate_tools(self) -> None:
+        for entry in self.tools_cfg.values():
+            if isinstance(entry, dict):
+                for exe in entry.values():
+                    self._validate_exe(exe)
+            else:
+                self._validate_exe(entry)
+
+        self.logger.info("[tool] All configured executables validated")
+
+    def _validate_exe(self, exe: str) -> None:
+        exe = str(exe)
+        p = Path(exe)
+        if p.is_absolute():
+            if not p.exists():
+                raise FileNotFoundError(f"Executable not found: {exe}")
+        else:
+            if which(exe) is None:
+                raise FileNotFoundError(f"Executable not on PATH: {exe}")

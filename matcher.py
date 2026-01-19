@@ -1,135 +1,112 @@
 #!/usr/bin/env python3
 """
-matcher_dynamic.py
+matcher.py
 
-MARK-2 Exhaustive Matching Stage
---------------------------------
-Responsibilities:
-- Resume-safe COLMAP exhaustive matching
-- Force-aware database cleanup
-- Matching quality assessment + report generation
+MARK-2 Matching Stage (Project-Scoped DB, GPU-SAFE)
+--------------------------------------------------
+- Uses project_root/database/database.db
+- ToolRunner enforced
+- Explicitly disables GPU (COLMAP limitation)
+- Resume-safe
 """
 
-import subprocess
 import sqlite3
 import json
-from pathlib import Path
 from math import comb
+from pathlib import Path
 
 from utils.paths import ProjectPaths
-from config_manager import create_runtime_config, validate_config
+from config_manager import load_config
+from tool_runner import ToolRunner
 
 
-# --------------------------------------------------
-# Command Runner
-# --------------------------------------------------
-def run_command(cmd, logger, label: str):
-    logger.info(f"[matcher] RUN: {label}")
-    logger.info(" ".join(map(str, cmd)))
-
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
-    if proc.stdout.strip():
-        logger.info(proc.stdout)
-
-    if proc.returncode != 0:
-        raise RuntimeError(f"[matcher] {label} failed")
-
-
-# --------------------------------------------------
-# Matching Statistics
-# --------------------------------------------------
-def collect_match_stats(database: Path, logger):
-    conn = sqlite3.connect(database)
-    cur = conn.cursor()
-
-    cur.execute("SELECT COUNT(*) FROM images")
-    image_count = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) FROM matches")
-    pair_count = cur.fetchone()[0]
-
-    cur.execute("SELECT LENGTH(data) FROM matches WHERE LENGTH(data) > 150")
-    strong_matches = len(cur.fetchall())
-
-    conn.close()
-
-    expected_pairs = comb(image_count, 2) if image_count >= 2 else 0
-    coverage = (strong_matches / pair_count * 100) if pair_count else 0.0
-
-    logger.info(
-        f"[matcher] Images: {image_count}, "
-        f"Pairs: {pair_count}, "
-        f"Strong matches: {strong_matches}, "
-        f"Coverage: {coverage:.2f}%"
-    )
-
-    return {
-        "images": image_count,
-        "match_pairs": pair_count,
-        "expected_pairs": expected_pairs,
-        "good_matches": strong_matches,
-        "coverage_percent": coverage,
-    }
-
-
-# --------------------------------------------------
-# Pipeline Stage
-# --------------------------------------------------
 def run(run_root: Path, project_root: Path, force: bool, logger):
+    logger.info("[matcher] START")
+
+    # --------------------------------------------------
+    # Project-scoped database (INTENTIONAL)
+    # --------------------------------------------------
     paths = ProjectPaths(project_root)
     paths.ensure_all()
 
-    logger.info("[matcher] Starting exhaustive matching")
+    db_path = paths.database / "database.db"
+    if not db_path.exists():
+        raise FileNotFoundError(
+            f"[matcher] database.db missing at {db_path}"
+        )
 
-    # Load runtime configuration
-    config = create_runtime_config(run_root, project_root, logger)
-    validate_config(config, logger)
+    # --------------------------------------------------
+    # Load run-scoped config
+    # --------------------------------------------------
+    config = load_config(run_root, logger)
 
-    db = paths.database / "database.db"
-    if not db.exists():
-        raise FileNotFoundError(f"[matcher] Missing database: {db}")
+    # 🔥 CRITICAL FIX:
+    # COLMAP exhaustive_matcher does NOT support GPU flags
+    original_gpu = config["execution"].get("use_gpu", True)
+    config["execution"]["use_gpu"] = False
 
-    if force:
-        logger.info("[matcher] Force enabled — clearing previous matches")
-        conn = sqlite3.connect(db)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM matches")
-        cur.execute("DELETE FROM two_view_geometries")
-        conn.commit()
-        conn.close()
+    try:
+        tool = ToolRunner(config, logger)
 
-    # COLMAP exhaustive matcher
-    run_command(
-        [
-            "colmap", "exhaustive_matcher",
-            "--database_path", db,
-            "--SiftMatching.max_ratio", "0.8",
-            "--SiftMatching.max_distance", "0.7",
-            "--TwoViewGeometry.min_num_inliers", "25",
-            "--TwoViewGeometry.max_error", "2.0",
-        ],
-        logger,
-        "Exhaustive Matching",
-    )
+        # --------------------------------------------------
+        # Optional reset
+        # --------------------------------------------------
+        if force:
+            logger.info("[matcher] Force enabled — clearing matches")
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM matches")
+            cur.execute("DELETE FROM two_view_geometries")
+            conn.commit()
+            conn.close()
 
-    # Assessment
-    stats = collect_match_stats(db, logger)
-    assessment = "good" if stats["coverage_percent"] >= 55 else "poor"
+        m = config["matching"]
+
+        # --------------------------------------------------
+        # Run COLMAP matcher (CPU-only)
+        # --------------------------------------------------
+        tool.run(
+            tool="colmap",
+            args=[
+                "exhaustive_matcher",
+                "--database_path", str(db_path),
+                "--SiftMatching.max_ratio", str(m.get("max_ratio", 0.8)),
+                "--SiftMatching.max_distance", str(m.get("max_distance", 0.7)),
+            ],
+        )
+
+    finally:
+        # Restore GPU policy for later stages
+        config["execution"]["use_gpu"] = original_gpu
+
+    # --------------------------------------------------
+    # Coverage report
+    # --------------------------------------------------
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    cur.execute("SELECT COUNT(*) FROM images")
+    images = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM matches")
+    pairs = cur.fetchone()[0]
+
+    conn.close()
+
+    coverage = (pairs / comb(images, 2) * 100) if images > 1 else 0.0
 
     report = {
-        "strategy": "exhaustive",
-        "statistics": stats,
-        "assessment": assessment,
+        "method": "exhaustive",
+        "scope": "project",
+        "images": images,
+        "pairs": pairs,
+        "coverage_percent": round(coverage, 2),
     }
 
     report_path = paths.database / "matching_report.json"
     report_path.write_text(json.dumps(report, indent=2))
 
-    logger.info(f"[matcher] Report written: {report_path}")
-    logger.info("[matcher] Matching stage complete")
+    logger.info(
+        f"[matcher] Images={images}, Pairs={pairs}, Coverage={coverage:.2f}%"
+    )
+    logger.info("[matcher] COMPLETED")

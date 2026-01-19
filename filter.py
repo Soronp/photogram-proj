@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-image_filter.py
+filter.py
 
 MARK-2 SfM-SAFE Image Filtering Stage
 ------------------------------------
 - Drops only catastrophic images
-- Never reasons about overlap or similarity
+- Never reasons about overlap
 - Guarantees geometric continuity
 """
 
@@ -20,7 +20,7 @@ SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
 
 
 # --------------------------------------------------
-# METRICS
+# Metrics
 # --------------------------------------------------
 
 def keypoint_count(img):
@@ -30,28 +30,29 @@ def keypoint_count(img):
 
 
 # --------------------------------------------------
-# PIPELINE STAGE
+# Pipeline Stage
 # --------------------------------------------------
 
 def run(run_root: Path, project_root: Path, force: bool, logger):
+    project_root = project_root.resolve()
+
     paths = ProjectPaths(project_root)
     paths.ensure_all()
 
-    src = paths.raw
+    src = paths.images_processed
     dst = paths.images_filtered
 
-    logger.info("[filter] Stage started (SfM-safe)")
+    logger.info("[filter] SfM-safe filtering started")
 
     if not src.exists():
-        raise RuntimeError("raw/ directory missing")
+        raise RuntimeError("[filter] images_processed missing")
 
     if dst.exists() and any(dst.iterdir()) and not force:
         logger.info("[filter] images_filtered exists — skipping")
         return
 
-    if dst.exists() and force:
+    if dst.exists():
         shutil.rmtree(dst)
-
     dst.mkdir(parents=True, exist_ok=True)
 
     images = sorted(p for p in src.iterdir() if p.suffix.lower() in SUPPORTED_EXTS)
@@ -62,8 +63,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     MIN_KEYPOINTS = 40
     MAX_DROP_RATIO = 0.10
 
-    kept = []
-    dropped = []
+    kept, dropped = [], []
 
     for path in images:
         img = cv2.imread(str(path))
@@ -73,25 +73,24 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
 
         kps = keypoint_count(img)
         if kps < MIN_KEYPOINTS:
-            dropped.append((path.name, f"no_features({kps})"))
+            dropped.append((path.name, f"low_features({kps})"))
             continue
 
         out_name = f"img_{len(kept):06d}.jpg"
         shutil.copy2(path, dst / out_name)
         kept.append(out_name)
 
-    drop_ratio = len(dropped) / total if total else 0.0
+    drop_ratio = len(dropped) / max(1, total)
 
     # --------------------------------------------------
-    # SAFETY NET
+    # Safety Net
     # --------------------------------------------------
 
     if drop_ratio > MAX_DROP_RATIO or len(kept) < max(8, int(total * 0.9)):
-        logger.warning("[filter] Filtering too destructive — reverting to no-op copy")
+        logger.warning("[filter] Filtering too destructive — reverting")
 
         shutil.rmtree(dst)
         dst.mkdir(parents=True, exist_ok=True)
-
         kept.clear()
         dropped.clear()
 

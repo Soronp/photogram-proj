@@ -4,10 +4,10 @@ config_manager.py
 
 MARK-2 Configuration Authority (Run-Scoped)
 -------------------------------------------
-- Creates one immutable config.yaml per run
-- Dataset-driven policy adaptation
+- Immutable config.yaml per run
 - Schema + policy merge
-- Single source of truth for all pipeline stages
+- Dataset-driven policy adaptation
+- Single source of truth for all tools
 - Deterministic, resume-safe
 """
 
@@ -15,13 +15,12 @@ from pathlib import Path
 from copy import deepcopy
 import json
 import yaml
-import hashlib
 
 from utils.paths import ProjectPaths
 
 
 # ============================================================
-# SCHEMA DEFAULTS (MECHANICAL ONLY)
+# SCHEMA DEFAULTS (STRUCTURAL ONLY)
 # ============================================================
 
 SCHEMA_DEFAULTS = {
@@ -30,15 +29,18 @@ SCHEMA_DEFAULTS = {
     },
 
     "capture": {
-        "mode": "expert",
+        "mode": "expert",  # expert | novice
     },
 
     "tools": {
         "colmap": {
             "executable": "colmap",
         },
+        "glomap": {
+            "executable": "glomap",
+        },
         "openmvs": {
-            "exporter": "InterfaceCOLMAP",
+            "interface": "InterfaceCOLMAP",
             "densify": "DensifyPointCloud",
             "mesh": "ReconstructMesh",
             "texture": "TextureMesh",
@@ -55,6 +57,8 @@ SCHEMA_DEFAULTS = {
     },
 
     "stages": {
+        "ingestion": True,
+        "preprocessing": True,
         "sparse": True,
         "dense": True,
         "mesh": True,
@@ -91,7 +95,6 @@ BASE_POLICY = {
 
     "sparse_reconstruction": {
         "method": "GLOMAP",
-        "rotation_filtering_angle_threshold": 30,
         "min_num_inliers": 15,
         "min_inlier_ratio": 0.15,
     },
@@ -102,7 +105,7 @@ BASE_POLICY = {
             "resolution_level": 1,
             "min_resolution": 640,
             "max_resolution": 2400,
-            "dense_reuse_depth": True,
+            "reuse_depth_maps": True,
         },
     },
 
@@ -127,7 +130,7 @@ BASE_POLICY = {
 
 def create_runtime_config(run_root: Path, project_root: Path, logger) -> dict:
     """
-    Create an immutable, run-scoped config.yaml.
+    Create immutable run-scoped config.yaml.
     Refuses to proceed without dataset intelligence.
     """
     run_root = run_root.resolve()
@@ -137,15 +140,15 @@ def create_runtime_config(run_root: Path, project_root: Path, logger) -> dict:
     config_path = run_root / "config.yaml"
     intel_path = paths.evaluation / "dataset_intelligence.json"
 
-    logger.info("[config] Creating run-specific configuration")
+    logger.info("[config] Initializing run configuration")
 
     if config_path.exists():
-        logger.info("[config] config.yaml already exists — reusing")
-        return load_config(run_root)
+        logger.info("[config] Existing config.yaml found — loading")
+        return load_config(run_root, logger)
 
     if not intel_path.exists():
         raise FileNotFoundError(
-            "dataset_intelligence.json missing — cannot generate config"
+            "dataset_intelligence.json missing — config generation blocked"
         )
 
     with open(intel_path, "r", encoding="utf-8") as f:
@@ -185,7 +188,7 @@ def create_runtime_config(run_root: Path, project_root: Path, logger) -> dict:
     if blur_ratio > 0.4:
         policy["sparse_reconstruction"]["min_num_inliers"] = 20
         policy["matching"]["max_distance"] = 0.65
-        logger.info("[config] Blur-heavy → stricter inliers")
+        logger.info("[config] Blur-heavy → stricter constraints")
 
     # --------------------------------------------------------
     # Merge policy into schema
@@ -211,8 +214,8 @@ def create_runtime_config(run_root: Path, project_root: Path, logger) -> dict:
 
 def load_config(run_root: Path, logger=None) -> dict:
     """
-    Load run-scoped config.yaml.
-    No fallback. No defaults. No mutation.
+    Load immutable run-scoped config.yaml.
+    No defaults. No mutation.
     """
     config_path = Path(run_root).resolve() / "config.yaml"
 
@@ -223,16 +226,21 @@ def load_config(run_root: Path, logger=None) -> dict:
         config = yaml.safe_load(f)
 
     if logger:
-        logger.info("[config] Loaded run configuration")
+        logger.info("[config] Run configuration loaded")
 
+    validate_config(config, logger)
     return config
 
 
 # ============================================================
-# VALIDATION
+# VALIDATION (CORE-SAFE)
 # ============================================================
 
-def validate_config(config: dict, logger) -> bool:
+def validate_config(config: dict, logger=None) -> None:
+    """
+    Validate immutable run-scoped config.
+    Raises on failure. Silent on success.
+    """
     required = {
         "project",
         "tools",
@@ -245,12 +253,16 @@ def validate_config(config: dict, logger) -> bool:
 
     missing = required - config.keys()
     if missing:
-        logger.error(f"[config] Missing sections: {missing}")
-        return False
+        raise ValueError(f"[config] Missing required sections: {missing}")
 
     if config["dense_reconstruction"].get("primary") != "OPENMVS":
-        logger.error("[config] OPENMVS must be primary dense backend")
-        return False
+        raise ValueError("[config] OPENMVS must be primary dense backend")
 
-    logger.info("[config] Configuration validation passed")
-    return True
+    if logger:
+        logger.info("[config] Configuration validated")
+    required_openmvs = {"interface", "densify", "mesh", "texture"}
+    missing = required_openmvs - config["tools"]["openmvs"].keys()
+    if missing:
+        raise ValueError(f"[config] Missing OpenMVS tool entries: {missing}")
+
+
