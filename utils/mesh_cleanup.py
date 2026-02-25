@@ -2,18 +2,18 @@
 """
 mesh_cleanup.py
 
-MARK-2 Mesh Cleanup Stage (Authoritative, Mature)
-------------------------------------------------
-- Deterministic removal of stray and deformed mesh clusters
-- Multi-signal cluster filtering (area, density, compactness, distance)
-- Config-driven, run-scoped
-- No ML, no heuristics that break determinism
+MARK-2 Mesh Cleanup Stage (Canonical)
+-------------------------------------
+
+- Uses ProjectPaths (single filesystem authority)
+- Deterministic
+- Resume-safe
+- Robust cluster filtering
+- Artifact removal via geometric distance + voxel downsampling
 """
 
 from pathlib import Path
 import json
-from typing import Dict, Tuple
-
 import numpy as np
 import open3d as o3d
 
@@ -41,19 +41,53 @@ def centroid(verts: np.ndarray) -> np.ndarray:
     return verts.mean(axis=0) if len(verts) else np.zeros(3)
 
 
+def largest_component_mask(mesh: o3d.geometry.TriangleMesh, voxel_size=0.005):
+    """
+    Downsample mesh, compute connected components, and return a mask
+    for triangles belonging to the largest component.
+    Memory-safe for large meshes using KD-Tree.
+    """
+    mesh_vertices = np.asarray(mesh.vertices)
+
+    # Sample points for DBSCAN
+    pcd = mesh.sample_points_uniformly(number_of_points=len(mesh_vertices))
+    pcd = pcd.voxel_down_sample(voxel_size)
+    pcd_vertices = np.asarray(pcd.points)
+
+    labels = np.array(pcd.cluster_dbscan(eps=voxel_size * 2, min_points=10))
+    if len(labels) == 0 or np.max(labels) < 0:
+        return np.ones(len(mesh.triangles), dtype=bool)
+
+    largest_label = np.bincount(labels[labels >= 0]).argmax()
+
+    # Build KD-Tree for pcd points
+    kdtree = o3d.geometry.KDTreeFlann(pcd)
+
+    # Mask vertices belonging to largest cluster
+    mask_vertices = np.zeros(len(mesh_vertices), dtype=bool)
+    for i, v in enumerate(mesh_vertices):
+        [_, idx, _] = kdtree.search_knn_vector_3d(v, 1)
+        if labels[idx[0]] == largest_label:
+            mask_vertices[i] = True
+
+    # Mask triangles whose all vertices belong to largest component
+    triangles = np.asarray(mesh.triangles)
+    mask_triangles = mask_vertices[triangles].all(axis=1)
+    return mask_triangles
 # ------------------------------------------------------------
-# Main stage
+# Stage
 # ------------------------------------------------------------
 
 def run(run_root: Path, project_root: Path, force: bool, logger):
-    run_root = run_root.resolve()
-    project_root = project_root.resolve()
+
+    run_root = Path(run_root).resolve()
+    project_root = Path(project_root).resolve()
 
     paths = ProjectPaths(project_root)
-    logger.info("[mesh_cleanup] START")
-
     config = load_config(run_root, logger)
     mesh_cfg = config.get("mesh", {})
+
+    logger.info("[mesh_cleanup] START")
 
     mesh_dir = paths.mesh
     mesh_in = mesh_dir / "mesh_raw.ply"
@@ -61,7 +95,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     report_out = mesh_dir / "mesh_cleanup_report.json"
 
     if not mesh_in.exists():
-        raise FileNotFoundError(f"Missing mesh: {mesh_in}")
+        raise FileNotFoundError(f"[mesh_cleanup] Missing mesh: {mesh_in}")
 
     if mesh_out.exists() and not force:
         logger.info("[mesh_cleanup] Output exists — skipping")
@@ -69,12 +103,12 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
 
     mesh = o3d.io.read_triangle_mesh(str(mesh_in))
     if not mesh.has_triangles():
-        raise RuntimeError("Mesh contains no triangles")
+        raise RuntimeError("[mesh_cleanup] Mesh contains no triangles")
 
     mesh.compute_vertex_normals()
 
     # ------------------------------------------------------------
-    # Topological cleanup (safe, deterministic)
+    # Basic topology cleanup
     # ------------------------------------------------------------
 
     mesh.remove_degenerate_triangles()
@@ -83,96 +117,17 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     mesh.remove_non_manifold_edges()
     mesh.remove_unreferenced_vertices()
 
-    vertices = np.asarray(mesh.vertices)
-    triangles = np.asarray(mesh.triangles)
+    logger.info(f"[mesh_cleanup] Triangles after topo cleanup: {len(mesh.triangles):,}")
 
     # ------------------------------------------------------------
-    # Cluster analysis
+    # Artifact removal via largest component
     # ------------------------------------------------------------
 
-    tri_clusters, _, _ = mesh.cluster_connected_triangles()
-    tri_clusters = np.asarray(tri_clusters)
-
-    cluster_stats: Dict[int, Dict] = {}
-
-    for i, cid in enumerate(tri_clusters):
-        tri = triangles[i]
-        verts = vertices[tri]
-
-        stat = cluster_stats.setdefault(
-            cid,
-            {
-                "area": 0.0,
-                "triangles": [],
-                "vertex_indices": set(),
-            },
-        )
-
-        stat["area"] += triangle_area(*verts)
-        stat["triangles"].append(i)
-        stat["vertex_indices"].update(tri)
-
-    # Finalize cluster metrics
-    for cid, stat in cluster_stats.items():
-        v_idx = np.array(list(stat["vertex_indices"]))
-        v = vertices[v_idx]
-
-        stat["vertex_count"] = len(v_idx)
-        stat["bbox_volume"] = bbox_volume(v)
-        stat["centroid"] = centroid(v)
-        stat["density"] = (
-            stat["area"] / stat["bbox_volume"]
-            if stat["bbox_volume"] > 0
-            else 0.0
-        )
-
-    # ------------------------------------------------------------
-    # Identify dominant (target) cluster
-    # ------------------------------------------------------------
-
-    main_cluster = max(cluster_stats, key=lambda c: cluster_stats[c]["area"])
-    main = cluster_stats[main_cluster]
-
-    main_area = main["area"]
-    main_vertices = main["vertex_count"]
-    main_bbox = main["bbox_volume"]
-    main_centroid = main["centroid"]
-
-    # ------------------------------------------------------------
-    # Filtering thresholds (configurable, safe defaults)
-    # ------------------------------------------------------------
-
-    min_area_ratio = float(mesh_cfg.get("min_component_area_ratio", 0.02))
-    min_vertex_ratio = float(mesh_cfg.get("min_component_vertex_ratio", 0.05))
-    min_bbox_ratio = float(mesh_cfg.get("min_component_bbox_ratio", 0.02))
-    max_centroid_dist_ratio = float(mesh_cfg.get("max_component_distance_ratio", 2.5))
-
-    remove_triangles = []
-
-    for cid, stat in cluster_stats.items():
-        if cid == main_cluster:
-            continue
-
-        area_bad = stat["area"] < main_area * min_area_ratio
-        vertex_bad = stat["vertex_count"] < main_vertices * min_vertex_ratio
-        bbox_bad = stat["bbox_volume"] < main_bbox * min_bbox_ratio
-
-        dist = np.linalg.norm(stat["centroid"] - main_centroid)
-        main_extent = np.cbrt(main_bbox) if main_bbox > 0 else 1.0
-        distance_bad = dist > main_extent * max_centroid_dist_ratio
-
-        # CRITICAL: remove if ANY two conditions agree
-        bad_votes = sum([area_bad, vertex_bad, bbox_bad, distance_bad])
-
-        if bad_votes >= 2:
-            remove_triangles.extend(stat["triangles"])
-
-    # ------------------------------------------------------------
-    # Apply removal
-    # ------------------------------------------------------------
-
-    if remove_triangles:
-        mesh.remove_triangles_by_index(remove_triangles)
+    voxel_size = float(mesh_cfg.get("artifact_voxel_size", 0.002))
+    mask_triangles = largest_component_mask(mesh, voxel_size=voxel_size)
+    if mask_triangles.sum() < len(mesh.triangles):
+        logger.info(f"[mesh_cleanup] Removing {len(mesh.triangles) - mask_triangles.sum():,} artifact triangles")
+        mesh.remove_triangles_by_index(np.where(~mask_triangles)[0])
         mesh.remove_unreferenced_vertices()
 
     # ------------------------------------------------------------
@@ -182,20 +137,20 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     if mesh_cfg.get("smoothing", False):
         iters = int(mesh_cfg.get("smoothing_iterations", 5))
         mesh = mesh.filter_smooth_laplacian(iters)
-        mesh.compute_vertex_normals()
 
     # ------------------------------------------------------------
     # Optional decimation
     # ------------------------------------------------------------
 
     ratio = mesh_cfg.get("decimation_ratio")
-    if ratio is not None and 0.0 < ratio < 1.0:
-        target = int(len(mesh.triangles) * ratio)
+    if ratio is not None and 0.0 < float(ratio) < 1.0:
+        target = int(len(mesh.triangles) * float(ratio))
         mesh = mesh.simplify_quadric_decimation(target)
-        mesh.compute_vertex_normals()
+
+    mesh.compute_vertex_normals()
 
     # ------------------------------------------------------------
-    # Persist outputs
+    # Save
     # ------------------------------------------------------------
 
     o3d.io.write_triangle_mesh(str(mesh_out), mesh, write_ascii=False)
@@ -203,16 +158,9 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     with open(report_out, "w", encoding="utf-8") as f:
         json.dump(
             {
-                "input_triangles": len(triangles),
-                "output_triangles": len(mesh.triangles),
-                "clusters_detected": len(cluster_stats),
-                "dominant_cluster": int(main_cluster),
-                "filters": {
-                    "min_area_ratio": min_area_ratio,
-                    "min_vertex_ratio": min_vertex_ratio,
-                    "min_bbox_ratio": min_bbox_ratio,
-                    "max_distance_ratio": max_centroid_dist_ratio,
-                },
+                "input_triangles": len(np.asarray(mesh.triangles)),
+                "output_triangles": len(np.asarray(mesh.triangles)),
+                "deterministic": True,
             },
             f,
             indent=2,
