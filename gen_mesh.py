@@ -41,7 +41,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     # --------------------------------------------------
 
     dense_dir = paths.dense                     # root/openmvs/dense
-    cleaned_dir = dense_dir / "cleaned"
+    cleaned_dir = dense_dir
     mesh_dir = paths.mesh                       # root/mesh
 
     raw_ply = dense_dir / "fused.ply"

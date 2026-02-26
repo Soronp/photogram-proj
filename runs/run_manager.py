@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-RunManager (Deterministic + Resume-Capable)
+RunManager (Deterministic + Strict Single Active Run)
 
 Responsibilities:
 - Discover runs

@@ -43,7 +43,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
 
     dense_dir = paths.dense                  # root/openmvs/dense
     eval_dir = paths.evaluation              # root/evaluation
-    output_dir = dense_dir / "cleaned"
+    output_dir = dense_dir
 
     output_dir.mkdir(parents=True, exist_ok=True)
 

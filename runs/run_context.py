@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-RunContext (Authoritative + Deterministic)
+RunContext (Deterministic + Full Stage Reset Support)
 
 Owns:
 - Run identity
 - Manifest metadata
 - Checkpoints
 - Logs directory
+- Stage directory cleanup
 
-Immutable contract:
-Pipeline stages MUST NOT modify this object directly.
-Only runner controls checkpoints.
+Only the runner manipulates checkpoints.
+Stages must be pure with respect to this object.
 """
 
 from pathlib import Path
@@ -18,6 +18,7 @@ from datetime import datetime
 import json
 import uuid
 import time
+import shutil
 from typing import List, Dict, Optional
 
 
@@ -32,14 +33,12 @@ class RunContext:
         self.runs_root.mkdir(parents=True, exist_ok=True)
 
         if run_id:
-            # Resume existing
             self.run_id = run_id
             self.root = self.runs_root / run_id
             if not self.root.exists():
                 raise RuntimeError(f"Run not found: {self.root}")
             self._new_run = False
         else:
-            # Create new
             ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
             uid = uuid.uuid4().hex[:6]
             self.run_id = f"run_{ts}_{uid}"
@@ -53,7 +52,7 @@ class RunContext:
         self._start_time: Optional[float] = None
 
     # --------------------------------------------------
-    # Initialization (new run only)
+    # Initialization
     # --------------------------------------------------
 
     def initialize(self, project_root: Path, input_path: Path):
@@ -64,7 +63,7 @@ class RunContext:
             raise RuntimeError(f"Run already exists: {self.root}")
 
         self.root.mkdir(parents=True)
-        self.logs.mkdir()
+        self.logs.mkdir(parents=True)
 
         self._start_time = time.time()
 
@@ -92,7 +91,7 @@ class RunContext:
             raise RuntimeError("Checkpoint file missing")
 
     # --------------------------------------------------
-    # Checkpoints (Runner Only)
+    # Checkpoint Handling
     # --------------------------------------------------
 
     def _load_checkpoints(self) -> Dict[str, str]:
@@ -115,25 +114,40 @@ class RunContext:
         return self._load_checkpoints().get(stage) == "done"
 
     def completed_stages(self) -> List[str]:
-        return [
-            k for k, v in self._load_checkpoints().items()
-            if v == "done"
-        ]
+        data = self._load_checkpoints()
+        return [k for k, v in data.items() if v == "done"]
+
+    # --------------------------------------------------
+    # TRUE FULL RESET LOGIC
+    # --------------------------------------------------
 
     def clear_from(self, restart_stage: str, pipeline_order: List[str]):
-        data = self._load_checkpoints()
+        """
+        Deterministic restart:
+        - Clears checkpoint entries from restart_stage onward
+        - Deletes stage directories from restart_stage onward
+        """
 
         if restart_stage not in pipeline_order:
             raise ValueError(f"Unknown stage: {restart_stage}")
+
+        checkpoints = self._load_checkpoints()
 
         clear = False
         for stage in pipeline_order:
             if stage == restart_stage:
                 clear = True
-            if clear and stage in data:
-                del data[stage]
 
-        self._write_checkpoints(data)
+            if clear:
+                # 1️⃣ Remove checkpoint entry
+                checkpoints.pop(stage, None)
+
+                # 2️⃣ Remove stage directory if it exists
+                stage_dir = self.root / stage
+                if stage_dir.exists() and stage_dir.is_dir():
+                    shutil.rmtree(stage_dir)
+
+        self._write_checkpoints(checkpoints)
 
     # --------------------------------------------------
     # Finalization
