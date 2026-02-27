@@ -2,20 +2,21 @@
 """
 mesh_cleanup.py
 
-MARK-2 Mesh Cleanup Stage (Canonical)
--------------------------------------
+MARK-2 Mesh Cleanup Stage (Dual-Poisson + Robust Artifact & Micro-hole Removal)
+-------------------------------------------------------------------------------
 
-- Uses ProjectPaths (single filesystem authority)
-- Deterministic
-- Resume-safe
-- Robust cluster filtering
-- Artifact removal via geometric distance + voxel downsampling
+- Removes Poisson halo / sandy edge artifacts including curved boundaries
+- Fills micro holes deterministically (small loops + planar projection)
+- Preserves real surface geometry
+- Generates metrics compatible with mesh evaluation
+- Deterministic & resume-safe
 """
 
 from pathlib import Path
 import json
 import numpy as np
 import open3d as o3d
+from scipy.spatial import Delaunay
 
 from utils.paths import ProjectPaths
 from config_manager import load_config
@@ -25,61 +26,161 @@ from config_manager import load_config
 # Helpers
 # ------------------------------------------------------------
 
-def triangle_area(a, b, c) -> float:
-    return 0.5 * np.linalg.norm(np.cross(b - a, c - a))
+def resolve_fused_cloud(paths: ProjectPaths, logger) -> Path:
+    candidates = [paths.dense / "fused_cleaned.ply", paths.dense / "fused.ply"]
+    for p in candidates:
+        if p.exists():
+            logger.info(f"[mesh_cleanup] Using fused cloud: {p}")
+            return p
+    raise FileNotFoundError(
+        "[mesh_cleanup] Missing fused point cloud.\n"
+        f"Expected one of:\n  {candidates[0]}\n  {candidates[1]}"
+    )
 
+def triangle_area(tri_pts: np.ndarray) -> np.ndarray:
+    """Compute triangle areas for an array of triangle vertices."""
+    vec0 = tri_pts[:,1] - tri_pts[:,0]
+    vec1 = tri_pts[:,2] - tri_pts[:,0]
+    return 0.5 * np.linalg.norm(np.cross(vec0, vec1), axis=1)
 
-def bbox_volume(verts: np.ndarray) -> float:
-    if len(verts) == 0:
-        return 0.0
-    min_v = verts.min(axis=0)
-    max_v = verts.max(axis=0)
-    return float(np.prod(max_v - min_v))
-
-
-def centroid(verts: np.ndarray) -> np.ndarray:
-    return verts.mean(axis=0) if len(verts) else np.zeros(3)
-
-
-def largest_component_mask(mesh: o3d.geometry.TriangleMesh, voxel_size=0.005):
-    """
-    Downsample mesh, compute connected components, and return a mask
-    for triangles belonging to the largest component.
-    Memory-safe for large meshes using KD-Tree.
-    """
-    mesh_vertices = np.asarray(mesh.vertices)
-
-    # Sample points for DBSCAN
-    pcd = mesh.sample_points_uniformly(number_of_points=len(mesh_vertices))
-    pcd = pcd.voxel_down_sample(voxel_size)
-    pcd_vertices = np.asarray(pcd.points)
-
-    labels = np.array(pcd.cluster_dbscan(eps=voxel_size * 2, min_points=10))
-    if len(labels) == 0 or np.max(labels) < 0:
-        return np.ones(len(mesh.triangles), dtype=bool)
-
-    largest_label = np.bincount(labels[labels >= 0]).argmax()
-
-    # Build KD-Tree for pcd points
-    kdtree = o3d.geometry.KDTreeFlann(pcd)
-
-    # Mask vertices belonging to largest cluster
-    mask_vertices = np.zeros(len(mesh_vertices), dtype=bool)
-    for i, v in enumerate(mesh_vertices):
-        [_, idx, _] = kdtree.search_knn_vector_3d(v, 1)
-        if labels[idx[0]] == largest_label:
-            mask_vertices[i] = True
-
-    # Mask triangles whose all vertices belong to largest component
+def remove_degenerate(mesh: o3d.geometry.TriangleMesh, eps=1e-12):
+    """Remove triangles with near-zero area."""
     triangles = np.asarray(mesh.triangles)
-    mask_triangles = mask_vertices[triangles].all(axis=1)
-    return mask_triangles
-# ------------------------------------------------------------
-# Stage
-# ------------------------------------------------------------
+    vertices = np.asarray(mesh.vertices)
+    if len(triangles) == 0:
+        return mesh
+    tri_pts = vertices[triangles]
+    areas = triangle_area(tri_pts)
+    mask = areas > eps
+    mesh.remove_triangles_by_mask(~mask)
+    mesh.remove_unreferenced_vertices()
+    return mesh
 
+def fill_micro_holes(mesh: o3d.geometry.TriangleMesh, max_hole_edges=12):
+    """Fill small boundary loops deterministically using planar projection."""
+    mesh.compute_vertex_normals()
+    vertices = np.asarray(mesh.vertices)
+    triangles = np.asarray(mesh.triangles)
+    if len(triangles) == 0:
+        return mesh
+
+    edges = mesh.get_non_manifold_edges(allow_boundary_edges=True)
+    if len(edges) == 0:
+        return mesh
+
+    edge_map = {}
+    for e in edges:
+        edge_map.setdefault(e[0], []).append(e[1])
+        edge_map.setdefault(e[1], []).append(e[0])
+
+    visited = set()
+    new_vertices = vertices.tolist()
+    new_triangles = triangles.tolist()
+
+    for start in edge_map:
+        if start in visited:
+            continue
+        # Traverse boundary loop
+        loop = [start]
+        current, prev = start, None
+        while True:
+            neighbors = [n for n in edge_map[current] if n != prev]
+            if not neighbors:
+                break
+            next_v = neighbors[0]
+            if next_v in loop:
+                break
+            loop.append(next_v)
+            prev, current = current, next_v
+        visited.update(loop)
+
+        if 3 <= len(loop) <= max_hole_edges:
+            # Planar projection fill
+            pts = np.array([new_vertices[i] for i in loop])
+            center = pts.mean(axis=0)
+            new_vertices.append(center.tolist())
+            center_idx = len(new_vertices) - 1
+            for i in range(len(loop)):
+                new_triangles.append([loop[i], loop[(i+1)%len(loop)], center_idx])
+        elif len(loop) > max_hole_edges:
+            # Planar Delaunay for larger loops
+            pts = np.array([new_vertices[i] for i in loop])
+            pts_mean = pts.mean(axis=0)
+            cov = np.cov((pts - pts_mean).T)
+            eigvals, eigvecs = np.linalg.eigh(cov)
+            u, v = eigvecs[:,1], eigvecs[:,2]
+            proj = np.dot(pts - pts_mean, np.column_stack((u,v)))
+            tri = Delaunay(proj)
+            for simplex in tri.simplices:
+                new_triangles.append([loop[simplex[0]], loop[simplex[1]], loop[simplex[2]]])
+
+    mesh.vertices = o3d.utility.Vector3dVector(np.array(new_vertices))
+    mesh.triangles = o3d.utility.Vector3iVector(np.array(new_triangles))
+    mesh.remove_duplicated_triangles()
+    mesh.remove_unreferenced_vertices()
+    return mesh
+
+def remove_edge_artifacts(mesh: o3d.geometry.TriangleMesh, area_ratio=1e-6, distance_ratio=0.15, curvature_ratio=0.85, iterations=2):
+    """Iteratively remove halo/edge triangles based on area, distance, and curvature."""
+    for _ in range(iterations):
+        triangles = np.asarray(mesh.triangles)
+        vertices = np.asarray(mesh.vertices)
+        if len(triangles) == 0:
+            break
+
+        bbox = mesh.get_axis_aligned_bounding_box()
+        diag = np.linalg.norm(bbox.get_max_bound() - bbox.get_min_bound())
+        area_threshold = (diag**2)*area_ratio
+        distance_threshold = diag*distance_ratio
+
+        tris_pts = vertices[triangles]
+        tri_area = 0.5*np.linalg.norm(np.cross(tris_pts[:,1]-tris_pts[:,0], tris_pts[:,2]-tris_pts[:,0]), axis=1)
+
+        centroid = vertices.mean(axis=0)
+        tri_centroids = tris_pts.mean(axis=1)
+        dist = np.linalg.norm(tri_centroids - centroid, axis=1)
+
+        mesh.compute_vertex_normals()
+        normals = np.asarray(mesh.vertex_normals)
+        tri_normals = normals[triangles].mean(axis=1)
+        normal_dev = np.linalg.norm(tri_normals, axis=1)
+
+        keep_mask = (tri_area > area_threshold) & (dist < distance_threshold) & (normal_dev < curvature_ratio)
+        if np.count_nonzero(keep_mask) < len(triangles)*0.1:
+            break
+        mesh.remove_triangles_by_mask(~keep_mask)
+        mesh.remove_unreferenced_vertices()
+    return mesh
+
+def full_topology_cleanup(mesh: o3d.geometry.TriangleMesh):
+    mesh = remove_degenerate(mesh)
+    mesh.remove_duplicated_triangles()
+    mesh.remove_duplicated_vertices()
+    mesh.remove_non_manifold_edges()
+    mesh.remove_unreferenced_vertices()
+    return mesh
+
+def largest_component(mesh: o3d.geometry.TriangleMesh):
+    clusters, cluster_counts, _ = mesh.cluster_connected_triangles()
+    if len(cluster_counts) == 0:
+        return mesh
+    largest_idx = np.argmax(cluster_counts)
+    remove_mask = clusters != largest_idx
+    mesh.remove_triangles_by_mask(remove_mask)
+    mesh.remove_unreferenced_vertices()
+    return mesh
+
+def boundary_aware_smoothing(mesh: o3d.geometry.TriangleMesh, taubin_iters=2, laplacian_iters=2):
+    mesh.filter_smooth_taubin(number_of_iterations=taubin_iters)
+    if len(mesh.get_non_manifold_edges(allow_boundary_edges=True)) > 0:
+        mesh.filter_smooth_laplacian(number_of_iterations=laplacian_iters)
+    return mesh
+
+
+# ------------------------------------------------------------
+# Main Stage
+# ------------------------------------------------------------
 def run(run_root: Path, project_root: Path, force: bool, logger):
-
     run_root = Path(run_root).resolve()
     project_root = Path(project_root).resolve()
 
@@ -87,83 +188,94 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     config = load_config(run_root, logger)
     mesh_cfg = config.get("mesh", {})
 
-    logger.info("[mesh_cleanup] START")
-
     mesh_dir = paths.mesh
-    mesh_in = mesh_dir / "mesh_raw.ply"
     mesh_out = mesh_dir / "mesh_cleaned.ply"
     report_out = mesh_dir / "mesh_cleanup_report.json"
-
-    if not mesh_in.exists():
-        raise FileNotFoundError(f"[mesh_cleanup] Missing mesh: {mesh_in}")
 
     if mesh_out.exists() and not force:
         logger.info("[mesh_cleanup] Output exists — skipping")
         return
 
-    mesh = o3d.io.read_triangle_mesh(str(mesh_in))
-    if not mesh.has_triangles():
-        raise RuntimeError("[mesh_cleanup] Mesh contains no triangles")
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Load fused cloud ---
+    fused_path = resolve_fused_cloud(paths, logger)
+    pcd = o3d.io.read_point_cloud(str(fused_path))
+    if not pcd.has_points():
+        raise RuntimeError("[mesh_cleanup] Fused cloud contains no points")
+
+    depth_high = int(mesh_cfg.get("poisson_depth", 10))
+    depth_low = int(mesh_cfg.get("poisson_low_depth", max(depth_high-2,6)))
+    trim_q = float(mesh_cfg.get("density_trim_quantile", 0.04))
+    smooth_iters = int(mesh_cfg.get("smoothing_iterations", 2))
+    decimation_ratio = mesh_cfg.get("decimation_ratio")
+
+    # --- Dual Poisson reconstruction ---
+    logger.info("[mesh_cleanup] Low-depth Poisson (edges)")
+    mesh_low, densities_low = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=depth_low, linear_fit=True)
+    mesh_low.compute_vertex_normals()
+
+    logger.info("[mesh_cleanup] High-depth Poisson (interior)")
+    mesh_high, densities_high = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=depth_high, linear_fit=True)
+    mesh_high.compute_vertex_normals()
+
+    # --- Merge ---
+    mesh = mesh_low + mesh_high
+    mesh = full_topology_cleanup(mesh)
+    logger.info(f"[mesh_cleanup] After merge: {len(mesh.triangles):,} triangles")
+
+    # --- Edge/Halo removal ---
+    mesh = remove_edge_artifacts(mesh)
+    logger.info(f"[mesh_cleanup] After edge removal: {len(mesh.triangles):,} triangles")
+
+    # --- Fill micro holes ---
+    mesh = fill_micro_holes(mesh)
+    logger.info(f"[mesh_cleanup] After hole filling: {len(mesh.triangles):,} triangles")
+
+    # --- Largest component ---
+    mesh = largest_component(mesh)
+    logger.info(f"[mesh_cleanup] After largest component: {len(mesh.triangles):,} triangles")
+
+    # --- Boundary-aware smoothing ---
+    mesh = boundary_aware_smoothing(mesh, taubin_iters=smooth_iters)
+    mesh = full_topology_cleanup(mesh)
+    logger.info(f"[mesh_cleanup] Applied smoothing ({smooth_iters} iterations)")
+
+    # --- Optional decimation ---
+    if decimation_ratio is not None:
+        ratio = float(decimation_ratio)
+        if 0.0 < ratio < 1.0:
+            target = int(len(mesh.triangles) * ratio)
+            mesh = mesh.simplify_quadric_decimation(target)
+            mesh = full_topology_cleanup(mesh)
+            logger.info(f"[mesh_cleanup] Decimated to {target:,} triangles")
 
     mesh.compute_vertex_normals()
 
-    # ------------------------------------------------------------
-    # Basic topology cleanup
-    # ------------------------------------------------------------
+    # --- Save output ---
+    if len(mesh.triangles) == 0 or len(mesh.vertices) == 0:
+        logger.warning("[mesh_cleanup] Mesh empty — skipping write")
+    else:
+        o3d.io.write_triangle_mesh(str(mesh_out), mesh, write_ascii=False)
+        logger.info(f"[mesh_cleanup] Mesh written: {mesh_out}")
 
-    mesh.remove_degenerate_triangles()
-    mesh.remove_duplicated_triangles()
-    mesh.remove_duplicated_vertices()
-    mesh.remove_non_manifold_edges()
-    mesh.remove_unreferenced_vertices()
-
-    logger.info(f"[mesh_cleanup] Triangles after topo cleanup: {len(mesh.triangles):,}")
-
-    # ------------------------------------------------------------
-    # Artifact removal via largest component
-    # ------------------------------------------------------------
-
-    voxel_size = float(mesh_cfg.get("artifact_voxel_size", 0.002))
-    mask_triangles = largest_component_mask(mesh, voxel_size=voxel_size)
-    if mask_triangles.sum() < len(mesh.triangles):
-        logger.info(f"[mesh_cleanup] Removing {len(mesh.triangles) - mask_triangles.sum():,} artifact triangles")
-        mesh.remove_triangles_by_index(np.where(~mask_triangles)[0])
-        mesh.remove_unreferenced_vertices()
-
-    # ------------------------------------------------------------
-    # Optional smoothing
-    # ------------------------------------------------------------
-
-    if mesh_cfg.get("smoothing", False):
-        iters = int(mesh_cfg.get("smoothing_iterations", 5))
-        mesh = mesh.filter_smooth_laplacian(iters)
-
-    # ------------------------------------------------------------
-    # Optional decimation
-    # ------------------------------------------------------------
-
-    ratio = mesh_cfg.get("decimation_ratio")
-    if ratio is not None and 0.0 < float(ratio) < 1.0:
-        target = int(len(mesh.triangles) * float(ratio))
-        mesh = mesh.simplify_quadric_decimation(target)
-
-    mesh.compute_vertex_normals()
-
-    # ------------------------------------------------------------
-    # Save
-    # ------------------------------------------------------------
-
-    o3d.io.write_triangle_mesh(str(mesh_out), mesh, write_ascii=False)
+    # --- Save metrics for evaluation ---
+    metrics = {
+        "output_triangles": len(mesh.triangles),
+        "output_vertices": len(mesh.vertices),
+        "poisson_high_depth": depth_high,
+        "poisson_low_depth": depth_low,
+        "density_trim_quantile": trim_q,
+        "dual_poisson_merge": True,
+        "edge_artifact_removal": True,
+        "micro_hole_filling": True,
+        "largest_component": True,
+        "boundary_smoothing": True,
+        "deterministic": True
+    }
 
     with open(report_out, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "input_triangles": len(np.asarray(mesh.triangles)),
-                "output_triangles": len(np.asarray(mesh.triangles)),
-                "deterministic": True,
-            },
-            f,
-            indent=2,
-        )
+        json.dump(metrics, f, indent=2)
 
+    logger.info(f"[mesh_cleanup] Cleanup report written: {report_out}")
     logger.info("[mesh_cleanup] DONE")

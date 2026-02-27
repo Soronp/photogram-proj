@@ -7,6 +7,7 @@ MARK-2 Input Ingestion Stage
 - Copy images into images_processed/
 - Copy videos into videos/
 - Deterministic frame extraction
+- Supports all common image formats (JPG, PNG, BMP, TIFF, etc.)
 """
 
 from pathlib import Path
@@ -15,38 +16,50 @@ import subprocess
 
 from utils.paths import ProjectPaths
 
+# Supported file extensions
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv"}
 
 
-def extract_video_frames(video: Path, out_dir: Path, fps: int, logger):
+def extract_video_frames(video: Path, out_dir: Path, fps: int, logger, output_ext: str = ".png"):
+    """
+    Extract frames from video at fixed FPS.
+    
+    Args:
+        video: Path to input video.
+        out_dir: Directory to save frames.
+        fps: Frames per second to extract.
+        logger: Logger for debug/info.
+        output_ext: Extension for saved frames (default PNG for lossless quality).
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    pattern = out_dir / f"{video.stem}_frame_%06d.jpg"
+    pattern = out_dir / f"{video.stem}_frame_%06d{output_ext}"
     cmd = [
         "ffmpeg", "-y",
         "-i", str(video),
         "-vf", f"fps={fps}",
         str(pattern),
     ]
-
     logger.info(f"[input] Extracting frames from {video.name}")
-
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if proc.stdout.strip():
         logger.debug(proc.stdout)
-
     if proc.returncode != 0:
         raise RuntimeError(f"[input] FFmpeg failed for {video.name}")
 
 
-def run(run_root: Path, project_root: Path, force: bool, logger, *, input_path: Path):
+def run(run_root: Path, project_root: Path, force: bool, logger, *, input_path: Path, fps: int = 2):
+    """
+    Main ingestion routine.
+    
+    Args:
+        run_root: Directory for this run's outputs.
+        project_root: Root of the project (contains images_processed/ and videos/).
+        force: Overwrite existing files if True.
+        logger: Logging object.
+        input_path: Path to input images/videos.
+        fps: Frame extraction rate for videos.
+    """
     project_root = project_root.resolve()
     input_path = input_path.resolve()
 
@@ -61,6 +74,9 @@ def run(run_root: Path, project_root: Path, force: bool, logger, *, input_path: 
     copied_images = 0
     copied_videos = 0
 
+    # -------------------------------
+    # Copy images and videos
+    # -------------------------------
     for item in sorted(input_path.iterdir()):
         if not item.is_file():
             continue
@@ -83,11 +99,17 @@ def run(run_root: Path, project_root: Path, force: bool, logger, *, input_path: 
 
     logger.info(f"[input] Copied {copied_images} images, {copied_videos} videos")
 
+    # -------------------------------
+    # Extract frames from videos
+    # -------------------------------
     for video in sorted(paths.videos.iterdir()):
         if video.suffix.lower() in VIDEO_EXTS:
-            extract_video_frames(video, paths.images_processed, fps=2, logger=logger)
+            extract_video_frames(video, paths.images_processed, fps=fps, logger=logger, output_ext=".png")
 
-    total_images = len(list(paths.images_processed.glob("*.jpg")))
+    # -------------------------------
+    # Count all ingested images
+    # -------------------------------
+    total_images = len([p for p in paths.images_processed.iterdir() if p.suffix.lower() in IMAGE_EXTS])
     if total_images == 0:
         raise RuntimeError("[input] No images available after ingestion")
 
