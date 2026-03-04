@@ -1,413 +1,309 @@
 #!/usr/bin/env python3
 """
-MARK-2 Visualization Stage (Robust + Version Safe)
+MARK-2 Scientific Visualization Stage (Thesis Edition)
+------------------------------------------------------
 
-Enhancements:
-- Unified legend box system with safe wrapping
-- Dynamic legend sizing (no overflow possible)
-- Clean aligned layout
-- Fully descriptive spider chart legend
-- No convention changes
+Clear, non-overlapping, publication-grade figures for
+Architectural Value Extraction Framework.
+
+Each figure includes:
+    • Architectural meaning in subtitle
+    • Improved spacing (no collisions)
+    • Reduced annotation clutter
+    • Vector export (.pdf) + high DPI PNG
+    • Auto-generated captions.txt
 """
 
 from pathlib import Path
+import json
 import numpy as np
-import open3d as o3d
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
-from matplotlib.lines import Line2D
-import textwrap
+import seaborn as sns
 
-from utils.paths import ProjectPaths
-from utils.config import load_config
+# ==========================================================
+# GLOBAL STYLE
+# ==========================================================
+
+plt.rcParams.update({
+    "figure.dpi": 300,
+    "savefig.dpi": 300,
+    "font.family": "serif",
+    "axes.titlesize": 13,
+    "axes.labelsize": 12
+})
+
+sns.set_style("whitegrid")
 
 
 # ==========================================================
-# UTILITIES
+# UTIL: SAVE FIGURE (PNG + PDF)
 # ==========================================================
 
-def clone_mesh(mesh):
-    return o3d.geometry.TriangleMesh(mesh)
-
-
-# ==========================================================
-# CAMERA SYSTEM
-# ==========================================================
-
-CAMERA_VIEWS = {
-    "Isometric": ([0.8, -1.2, 0.6], [0, 0, 1]),
-    "Front": ([0, -1, 0], [0, 0, 1]),
-    "Side": ([1, 0, 0], [0, 0, 1]),
-    "Top": ([0, 0, 1], [0, 1, 0]),
-}
-
-
-def render_with_camera(geometries, front, up, width=1200, height=900):
-
-    if not isinstance(geometries, list):
-        geometries = [geometries]
-
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(visible=False, width=width, height=height)
-
-    for g in geometries:
-        vis.add_geometry(g)
-
-    opt = vis.get_render_option()
-    opt.background_color = np.array([1, 1, 1])
-    opt.light_on = True
-    opt.mesh_show_back_face = True
-
-    ctr = vis.get_view_control()
-    bbox = geometries[0].get_axis_aligned_bounding_box()
-    center = bbox.get_center()
-
-    ctr.set_lookat(center)
-    ctr.set_front(front)
-    ctr.set_up(up)
-    ctr.set_zoom(0.7)
-
-    vis.poll_events()
-    vis.update_renderer()
-    img = np.asarray(vis.capture_screen_float_buffer(False))
-    vis.destroy_window()
-    return img
+def save_figure(fig, out_path: Path):
+    fig.savefig(out_path, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
+    plt.close(fig)
 
 
 # ==========================================================
-# UNIFIED LEGEND BOX SYSTEM (SAFE + SELF-CONTAINED)
+# 1️⃣ ARCHITECTURAL METRICS BAR
 # ==========================================================
 
-def draw_legend_box(ax, raw_text, fontsize=11, wrap_width=44):
-
-    ax.axis("off")
-
-    # ---- Layout controls ----
-    left_pad = 0.08
-    right_pad = 0.08
-    top_pad = 0.08
-    bottom_pad = 0.08
-
-    text_left = left_pad + 0.03
-    text_top = 1 - top_pad - 0.03
-
-    # ---- Safe text wrapping ----
-    wrapped_lines = []
-    for paragraph in raw_text.split("\n"):
-        if paragraph.strip() == "":
-            wrapped_lines.append("")
-        else:
-            wrapped = textwrap.fill(paragraph, width=wrap_width)
-            wrapped_lines.extend(wrapped.split("\n"))
-
-    final_text = "\n".join(wrapped_lines)
-
-    # ---- Dynamic height calculation ----
-    line_height = 0.042
-    text_height = line_height * len(wrapped_lines)
-
-    box_height = text_height + 0.06
-    max_height = 1 - top_pad - bottom_pad
-    box_height = min(box_height, max_height)
-
-    box_bottom = 1 - top_pad - box_height
-    box_width = 1 - left_pad - right_pad
-
-    rect = Rectangle(
-        (left_pad, box_bottom),
-        box_width,
-        box_height,
-        fill=False,
-        linewidth=2,
-        edgecolor="black",
-        transform=ax.transAxes
-    )
-    ax.add_patch(rect)
-
-    ax.text(
-        text_left,
-        text_top,
-        final_text,
-        va="top",
-        fontsize=fontsize,
-        linespacing=1.4,
-        transform=ax.transAxes
-    )
-
-
-def save_with_legend(image, title, legend_text, output_path, cmap=None):
-
-    fig = plt.figure(figsize=(18, 8))
-    fig.patch.set_facecolor("white")
-
-    ax_img = plt.axes([0.05, 0.1, 0.6, 0.8])
-    ax_img.imshow(image, cmap=cmap)
-    ax_img.set_title(title, fontsize=18, fontweight="bold")
-    ax_img.axis("off")
-
-    ax_leg = plt.axes([0.7, 0.1, 0.25, 0.8])
-    draw_legend_box(ax_leg, legend_text, fontsize=11)
-
-    plt.savefig(output_path, dpi=300)
-    plt.close()
-
-
-# ==========================================================
-# CURVATURE
-# ==========================================================
-
-def compute_curvature_colors(mesh):
-
-    mesh.compute_vertex_normals()
-    normals = np.asarray(mesh.vertex_normals)
-
-    mean_normal = normals.mean(axis=0)
-    curvature = np.linalg.norm(normals - mean_normal, axis=1)
-
-    min_val = float(curvature.min())
-    max_val = float(curvature.max())
-    denom = max(max_val - min_val, 1e-8)
-
-    curvature = (curvature - min_val) / denom
-    colors = plt.cm.inferno(curvature)[:, :3]
-
-    mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
-    return mesh
-
-
-# ==========================================================
-# NORMAL RGB
-# ==========================================================
-
-def compute_normal_colors(mesh):
-
-    mesh.compute_vertex_normals()
-    normals = np.asarray(mesh.vertex_normals)
-    normals = (normals + 1.0) / 2.0
-
-    mesh.vertex_colors = o3d.utility.Vector3dVector(normals)
-    return mesh
-
-
-# ==========================================================
-# WIREFRAME
-# ==========================================================
-
-def compute_wireframe_overlay(mesh):
-
-    mesh.paint_uniform_color([0.85, 0.85, 0.85])
-    lines = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
-    lines.paint_uniform_color([0, 0, 0])
-
-    return mesh, lines
-
-
-# ==========================================================
-# QUAD VIEW
-# ==========================================================
-
-def create_quad_view(mesh, output_path):
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.patch.set_facecolor("white")
-
-    view_items = list(CAMERA_VIEWS.items())
-
-    for ax, (name, (front, up)) in zip(axes.flatten(), view_items):
-        temp_mesh = clone_mesh(mesh)
-        img = render_with_camera(temp_mesh, front, up)
-
-        ax.imshow(img)
-        ax.set_title(f"{name} View", fontsize=14, fontweight="bold")
-        ax.axis("off")
-
-    fig.add_artist(Line2D([0.5, 0.5], [0.05, 0.95],
-                          transform=fig.transFigure,
-                          linewidth=4, color="black"))
-
-    fig.add_artist(Line2D([0.05, 0.95], [0.5, 0.5],
-                          transform=fig.transFigure,
-                          linewidth=4, color="black"))
-
-    plt.savefig(output_path, dpi=300)
-    plt.close()
-
-
-# ==========================================================
-# METRICS
-# ==========================================================
-
-def compute_architectural_metrics(mesh):
-
-    verts = np.asarray(mesh.vertices)
-    tris = np.asarray(mesh.triangles)
-
-    bbox = mesh.get_axis_aligned_bounding_box()
-    volume = np.prod(bbox.get_extent()) + 1e-8
-
-    surface = min(len(verts) / volume / 10000, 1.0)
-
-    mesh.compute_vertex_normals()
-    normals = np.asarray(mesh.vertex_normals)
-    geometric = 1.0 - min(np.var(normals) * 5, 1.0)
-
-    cluster_result = mesh.cluster_connected_triangles()
-    labels = np.asarray(cluster_result[0])
-
-    if len(labels) > 0:
-        largest = np.bincount(labels).max()
-        continuity = largest / len(tris)
-    else:
-        continuity = 0.0
-
-    tri_density = len(tris) / volume
-    detail = min(tri_density / 20000, 1.0)
-
-    topology = 1.0 - min(len(mesh.get_non_manifold_edges()) / 1000, 1.0)
-
-    scores = np.clip(
-        [surface, geometric, continuity, detail, topology],
-        0, 1
-    )
-
-    return scores * 100
-
-
-# ==========================================================
-# SPIDER CHART
-# ==========================================================
-
-def create_spider_chart(scores, output_path):
-
-    categories = [
-        "Surface Completeness",
-        "Geometric Consistency",
-        "Structural Continuity",
-        "Detail Resolution",
-        "Topology Cleanliness",
+def save_metrics_bar(metrics, out_path):
+    keys = [
+        "geometric_fidelity",
+        "structural_regularity",
+        "surface_integrity",
+        "detail_richness",
+        "spatial_coherence"
     ]
 
-    baseline = [55, 60, 50, 45, 65]
+    labels = [
+        "Geometric Fidelity",
+        "Structural Regularity",
+        "Surface Integrity",
+        "Detail Richness",
+        "Spatial Coherence"
+    ]
 
-    N = len(categories)
-    angles = np.linspace(0, 2*np.pi, N, endpoint=False).tolist()
-    angles += angles[:1]
+    values = [metrics.get(k, 0.0) for k in keys]
+    avi = metrics.get("architectural_value_index", 0.0)
 
-    values = scores.tolist()
-    values += values[:1]
-    baseline += baseline[:1]
+    fig, ax = plt.subplots(figsize=(10,5), constrained_layout=True)
+    bars = ax.bar(labels, values)
 
-    fig = plt.figure(figsize=(16, 8))
-
-    ax = plt.axes([0.05, 0.1, 0.55, 0.8], polar=True)
-    ax.set_theta_offset(np.pi / 2)
-    ax.set_theta_direction(-1)
-
-    ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(categories, fontsize=11, fontweight="bold")
-    ax.set_ylim(0, 100)
-
-    ax.plot(angles, values, linewidth=3)
-    ax.fill(angles, values, alpha=0.4)
-
-    ax.plot(angles, baseline, linewidth=3)
-    ax.fill(angles, baseline, alpha=0.2)
-
-    ax.set_title("Architectural Quality Evaluation",
-                 fontsize=18, fontweight="bold", pad=25)
-
-    ax_leg = plt.axes([0.68, 0.1, 0.30, 0.8])
-
-    legend_text = (
-        "Surface Completeness: Coverage of mesh relative to "
-        "volume. Higher means fewer missing regions.\n\n"
-        "Geometric Consistency: Stability of surface normals. "
-        "Higher means smoother, less noisy geometry.\n\n"
-        "Structural Continuity: Connectivity of mesh components. "
-        "Higher means minimal fragmentation.\n\n"
-        "Detail Resolution: Triangle density per volume. "
-        "Higher means finer geometric detail captured.\n\n"
-        "Topology Cleanliness: Presence of invalid or "
-        "non-manifold edges. Higher means structurally valid "
-        "mesh topology.\n\n"
-        "Interpretation: Higher overall scores reflect a more "
-        "complete, stable, detailed, and structurally sound "
-        "reconstruction."
+    ax.set_ylim(0, 1.08)
+    ax.set_ylabel("Normalized Score")
+    ax.set_title(
+        f"Architectural Value Profile\n"
+        f"Composite Index (AVI) = {avi:.3f}",
+        pad=12
     )
 
-    draw_legend_box(ax_leg, legend_text, fontsize=10)
+    ax.tick_params(axis='x', rotation=20)
 
-    plt.savefig(output_path, dpi=300)
-    plt.close()
+    for bar in bars:
+        height = bar.get_height()
+        ax.text(
+            bar.get_x() + bar.get_width()/2,
+            height + 0.03,
+            f"{height:.2f}",
+            ha='center',
+            fontsize=10
+        )
+
+    save_figure(fig, out_path)
 
 
 # ==========================================================
-# MAIN
+# 2️⃣ STRUCTURAL REGULARITY
 # ==========================================================
 
-def run(run_root: Path, project_root: Path, force: bool, logger):
+def save_structural_regularity(data, out_path):
+    arr = np.array(data)
+    if len(arr) == 0:
+        return
 
+    fig, ax = plt.subplots(figsize=(7,5), constrained_layout=True)
+    sns.boxplot(y=arr, ax=ax)
+
+    mean_val = np.mean(arr)
+    ax.set_title(
+        "Structural Regularity — Wall Planarity Consistency\n"
+        f"Mean Variance = {mean_val:.5e}  (Lower = Straighter Walls)",
+        pad=10
+    )
+    ax.set_ylabel("Plane Inlier Variance")
+
+    save_figure(fig, out_path)
+
+
+# ==========================================================
+# 3️⃣ DETAIL RICHNESS
+# ==========================================================
+
+def save_detail_richness(data, out_path):
+    arr = np.array(data)
+    if len(arr) == 0:
+        return
+
+    if len(arr) > 80_000:
+        idx = np.random.choice(len(arr), 80_000, replace=False)
+        arr = arr[idx]
+
+    fig, ax = plt.subplots(figsize=(7,5), constrained_layout=True)
+    sns.violinplot(y=arr, inner="quartile", ax=ax)
+
+    ax.set_title(
+        "Detail Richness — Surface Ornamentation Intensity\n"
+        "(Higher Curvature = More Architectural Detail)",
+        pad=10
+    )
+    ax.set_ylabel("Mean Curvature Magnitude")
+
+    save_figure(fig, out_path)
+
+
+# ==========================================================
+# 4️⃣ SPATIAL COHERENCE (FIXED CLEAN VERSION)
+# ==========================================================
+
+def save_spatial_coherence(data, out_path):
+    arr = np.array(data)
+    if len(arr) == 0:
+        return
+
+    mean_val = np.mean(arr)
+    std_val = np.std(arr)
+    cv = std_val / (mean_val + 1e-12)
+
+    fig, ax = plt.subplots(figsize=(8,5), constrained_layout=True)
+    sns.boxplot(y=arr, ax=ax)
+
+    # Expand limits to prevent text overlap
+    ymin, ymax = ax.get_ylim()
+    ax.set_ylim(ymin, ymax * 1.1)
+
+    ax.set_title(
+        "Spatial Coherence — Reconstruction Density Uniformity\n"
+        f"Coefficient of Variation (CV) = {cv:.4f}  (Lower = More Uniform)",
+        pad=12
+    )
+    ax.set_ylabel("Normalized Local Vertex Density")
+
+    save_figure(fig, out_path)
+
+
+# ==========================================================
+# 5️⃣ SURFACE INTEGRITY
+# ==========================================================
+
+def save_surface_integrity(topo, out_path):
+    keys = ["non_manifold_edges", "boundary_edges", "components"]
+    labels = ["Non-Manifold Edges", "Boundary Edges", "Connected Components"]
+    values = [topo.get(k, 0) for k in keys]
+
+    fig, ax = plt.subplots(figsize=(9,4.5), constrained_layout=True)
+    bars = ax.bar(labels, values)
+
+    ax.set_ylabel("Count")
+    ax.set_title(
+        "Surface Integrity — Topological Defects\n"
+        "(Mesh Completeness and Connectivity)",
+        pad=10
+    )
+
+    ax.tick_params(axis='x', rotation=15)
+
+    for bar in bars:
+        height = bar.get_height()
+        ax.text(
+            bar.get_x() + bar.get_width()/2,
+            height + max(values)*0.02 if max(values) > 0 else 0.1,
+            f"{int(height)}",
+            ha='center',
+            fontsize=10
+        )
+
+    save_figure(fig, out_path)
+
+
+# ==========================================================
+# 6️⃣ CURVATURE–DENSITY HEXBIN
+# ==========================================================
+
+def save_hexbin(curvature, density, out_path):
+    if not curvature or not density:
+        return
+
+    N = min(len(curvature), len(density), 80_000)
+    idx = np.random.choice(len(curvature), N, replace=False)
+
+    curv = np.array(curvature)[idx]
+    dens = np.array(density)[idx]
+
+    fig, ax = plt.subplots(figsize=(8,6), constrained_layout=True)
+
+    hb = ax.hexbin(curv, dens, gridsize=40, bins='log')
+    fig.colorbar(hb, ax=ax, label="Log Density")
+
+    ax.set_xlabel("Curvature")
+    ax.set_ylabel("Local Density")
+
+    ax.set_title(
+        "Curvature–Density Interaction\n"
+        "(Relationship Between Ornamentation and Reconstruction Coverage)",
+        pad=12
+    )
+
+    save_figure(fig, out_path)
+
+
+# ==========================================================
+# CAPTION GENERATOR
+# ==========================================================
+
+def generate_captions(vis_dir):
+    captions = """
+Figure 1: Architectural Value Profile.
+Normalized scores for five architectural dimensions and composite index (AVI).
+
+Figure 2: Structural Regularity.
+Distribution of RANSAC plane inlier variance measuring wall and surface planarity.
+
+Figure 3: Detail Richness.
+Curvature magnitude distribution indicating architectural ornamentation intensity.
+
+Figure 4: Spatial Coherence.
+Local density uniformity; lower CV indicates more evenly reconstructed geometry.
+
+Figure 5: Surface Integrity.
+Counts of non-manifold edges, boundary edges, and disconnected components.
+
+Figure 6: Curvature–Density Interaction.
+Density map showing relationship between geometric detail and reconstruction coverage.
+"""
+    with open(vis_dir / "captions.txt", "w") as f:
+        f.write(captions.strip())
+
+
+# ==========================================================
+# MAIN ENTRY
+# ==========================================================
+
+def run(run_root: Path, project_root: Path, input_path: Path, force: bool, logger):
+
+    from utils.paths import ProjectPaths
     paths = ProjectPaths(project_root)
-    load_config(run_root)
+    paths.ensure_all()
 
-    mesh_path = paths.mesh / "mesh_cleaned.ply"
+    eval_path = paths.evaluation / "architectural_metrics.json"
     vis_dir = paths.visualization
     vis_dir.mkdir(parents=True, exist_ok=True)
 
-    if not mesh_path.exists():
-        logger.info("[vis] No mesh found")
+    if not eval_path.exists():
+        logger.error(f"[vis] Evaluation metrics not found at {eval_path}")
         return
 
-    logger.info("[vis] Loading mesh")
-    mesh = o3d.io.read_triangle_mesh(str(mesh_path))
-    mesh.compute_vertex_normals()
+    with open(eval_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    logger.info("[vis] Creating quad composite")
-    create_quad_view(mesh, vis_dir / "multi_view_composite.png")
+    metrics = data.get("architectural_metrics", {})
+    diagnostics = data.get("diagnostics", {})
 
-    logger.info("[vis] Creating curvature heatmap")
-    curv_mesh = compute_curvature_colors(clone_mesh(mesh))
-    img = render_with_camera(curv_mesh, *CAMERA_VIEWS["Isometric"])
+    save_metrics_bar(metrics, vis_dir / "architectural_metrics_bar.png")
+    save_structural_regularity(diagnostics.get("plane_variances", []),
+                               vis_dir / "structural_regularity_box.png")
+    save_detail_richness(diagnostics.get("curvature", []),
+                         vis_dir / "detail_richness_violin.png")
+    save_spatial_coherence(diagnostics.get("density", []),
+                           vis_dir / "spatial_coherence_box.png")
+    save_surface_integrity(diagnostics.get("topology", {}),
+                           vis_dir / "surface_integrity_bar.png")
+    save_hexbin(diagnostics.get("curvature", []),
+                diagnostics.get("density", []),
+                vis_dir / "curvature_vs_density_hexbin.png")
 
-    save_with_legend(
-        img,
-        "Curvature Heatmap",
-        "Curvature via normal deviation (normalized 0–1).\n\n"
-        "Bright → high surface variation\n"
-        "Dark → planar/smooth regions",
-        vis_dir / "curvature_heatmap.png"
-    )
+    generate_captions(vis_dir)
 
-    logger.info("[vis] Creating normal visualization")
-    norm_mesh = compute_normal_colors(clone_mesh(mesh))
-    img = render_with_camera(norm_mesh, *CAMERA_VIEWS["Isometric"])
-
-    save_with_legend(
-        img,
-        "Normal RGB Visualization",
-        "Normals encoded as RGB.\n"
-        "R = X | G = Y | B = Z\n\n"
-        "Abrupt shifts → orientation instability\n"
-        "Smooth gradients → stable geometry",
-        vis_dir / "normal_visualization.png"
-    )
-
-    logger.info("[vis] Creating wireframe overlay")
-    shaded, lines = compute_wireframe_overlay(clone_mesh(mesh))
-    img = render_with_camera([shaded, lines], *CAMERA_VIEWS["Isometric"])
-
-    save_with_legend(
-        img,
-        "Wireframe Overlay",
-        "Black lines = triangle edges.\n\n"
-        "Dense → high detail\n"
-        "Sparse → low resolution\n"
-        "Irregular → topology artifacts",
-        vis_dir / "wireframe_overlay.png"
-    )
-
-    logger.info("[vis] Creating spider chart")
-    scores = compute_architectural_metrics(mesh)
-    create_spider_chart(scores, vis_dir / "architectural_spider_chart.png")
-
-    logger.info("[vis] Visualization suite complete")
+    logger.info(f"[vis] MARK-2 Visualization Complete → {vis_dir}")
