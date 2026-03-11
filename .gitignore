@@ -19,7 +19,6 @@ config.yaml
 /dense
 /database
 /mesh
-/evaluation
 /sparse
 /textures
 /raw
@@ -31,3 +30,4 @@ OpenMVS_Windows_x64
 /gpu
 /.vscode
 /runs/__pycache__/
+config/__pycache__
