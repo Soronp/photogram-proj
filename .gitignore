@@ -1,4 +1,8 @@
 # Ignore virtual environments
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
 .venv/
 venv/
 /setup/__pycache__/
@@ -32,3 +36,10 @@ OpenMVS_Windows_x64
 /runs/__pycache__/
 /config/__pycache__
 /core/__pycache__
+/evaluation/__pycache__/
+/stages/__pycache__/
+# IDE
+.vscode/
+
+# Logs
+logs/
