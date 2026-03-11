@@ -1,45 +1,70 @@
-# Ignore virtual environments
-# Python cache
+# -------------------------
+# Python cache (GLOBAL)
+# -------------------------
 __pycache__/
 *.py[cod]
 *$py.class
+
+# -------------------------
+# Virtual environments
+# -------------------------
 .venv/
 venv/
-/setup/__pycache__/
-/colmap
-/utils/__pycache__/
-/__pycache__
-/input/
-/logs/
-/processed/
-/reconstructions/
-colmap.zip
-/evaluations/
-/glomap
-/ffmpeg
-config.yaml
-/images
-/images_filtered
-/dense
-/database
-/mesh
-/sparse
-/textures
-/raw
-/project.json
-/images_processed
-/visualization
-OpenMVS_Windows_x64
-/cpu
-/gpu
-/.vscode
-/runs/__pycache__/
-/config/__pycache__
-/core/__pycache__
-/evaluation/__pycache__/
-/stages/__pycache__/
+
+# -------------------------
 # IDE
+# -------------------------
 .vscode/
 
+# -------------------------
+# Project configs / metadata
+# -------------------------
+config.yaml
+project.json
+
+# -------------------------
 # Logs
+# -------------------------
 logs/
+
+# -------------------------
+# External tools / binaries
+# -------------------------
+colmap/
+glomap/
+ffmpeg/
+OpenMVS_Windows_x64/
+
+# -------------------------
+# Hardware build folders
+# -------------------------
+cpu/
+gpu/
+
+# -------------------------
+# Data / pipeline outputs
+# -------------------------
+input/
+processed/
+reconstructions/
+evaluations/
+runs/
+images/
+images_filtered/
+images_processed/
+raw/
+
+# -------------------------
+# Reconstruction outputs
+# -------------------------
+dense/
+sparse/
+mesh/
+textures/
+database/
+visualization/
+
+# -------------------------
+# Archives
+# -------------------------
+colmap.zip
