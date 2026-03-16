@@ -1,74 +1,46 @@
-#!/usr/bin/env python3
-"""
-logger.py
-
-Run logger utilities for the MARK-2 pipeline.
-"""
-
 import logging
 from pathlib import Path
 
 
-# --------------------------------------------------
-# Logger Creation
-# --------------------------------------------------
-
-def create_run_logger(run_id: str, logs_dir: Path) -> logging.Logger:
+def setup_logger(log_dir: Path, level=logging.INFO):
     """
-    Create the canonical run logger.
+    Initialize a unified pipeline logger.
 
-    Output:
-        workspace/runs/<run_id>/logs/run.log
+    Parameters
+    ----------
+    log_dir : Path
+        Directory where logs will be written.
+    level : logging level
+        Default logging level.
     """
 
-    logs_dir = Path(logs_dir).resolve()
-    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
 
-    logger_name = f"pipeline::{run_id}"
+    log_file = log_dir / "pipeline.log"
 
-    logger = logging.getLogger(logger_name)
+    logger = logging.getLogger("photogrammetry_pipeline")
+    logger.setLevel(level)
 
-    if logger.handlers:
-        return logger
+    if logger.hasHandlers():
+        logger.handlers.clear()
 
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
+    # File handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(level)
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
 
     formatter = logging.Formatter(
-        "[%(asctime)s] [%(levelname)s] %(message)s",
-        "%Y-%m-%d %H:%M:%S",
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        "%Y-%m-%d %H:%M:%S"
     )
 
-    # -------------------------
-    # File handler
-    # -------------------------
-
-    file_path = logs_dir / "run.log"
-
-    file_handler = logging.FileHandler(file_path, encoding="utf-8")
     file_handler.setFormatter(formatter)
-
-    # -------------------------
-    # Console handler
-    # -------------------------
-
-    console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
 
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
 
-    logger.info("Logger initialized")
-
     return logger
-
-
-# --------------------------------------------------
-# Retrieve existing logger
-# --------------------------------------------------
-
-def get_logger(run_id: str) -> logging.Logger:
-
-    logger_name = f"pipeline::{run_id}"
-
-    return logging.getLogger(logger_name)

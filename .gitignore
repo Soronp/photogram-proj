@@ -53,17 +53,6 @@ images/
 images_filtered/
 images_processed/
 raw/
-
-# -------------------------
-# Reconstruction outputs
-# -------------------------
-dense/
-sparse/
-mesh/
-textures/
-database/
-visualization/
-
 # -------------------------
 # Archives
 # -------------------------

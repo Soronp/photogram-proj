@@ -1,281 +1,94 @@
-#!/usr/bin/env python3
-"""
-MARK-2 Photogrammetry Pipeline Runner
-Deterministic execution engine
-"""
-
-import sys
-import time
-import traceback
-import argparse
-import importlib
 from pathlib import Path
 
-# --------------------------------------------------
-# Make project root importable
-# --------------------------------------------------
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
-
-# --------------------------------------------------
-
-from utils.paths import WorkspacePaths, RunPaths
-from utils.logger import create_run_logger
+from utils.paths import ProjectPaths
+from utils.logger import setup_logger
 from core.tool_runner import ToolRunner
-from config.config_manager import create_runtime_config, validate_config
+from core.stage import Stage
 
 
-# --------------------------------------------------
-# MARK-2 Pipeline Stage Order
-# --------------------------------------------------
+class Runner:
+    """
+    Pipeline runner responsible for executing stages sequentially.
+    """
 
-PIPELINE_STAGES = [
+    def __init__(self, project_root, config=None):
 
-    # DATASET PREPARATION
-    "stages.dataset_manifest",
-    "stages.ingestion",
-    "stages.pre_proc",
-    "stages.filter",
+        # Initialize paths
+        self.paths = ProjectPaths(project_root)
+        self.paths.create_all()
 
-    # SPARSE RECONSTRUCTION
-    "stages.sparse.db_builder",
-    "stages.sparse.matcher",
-    "stages.sparse.sparse_reconstruction",
-    "stages.sparse.sparse_eval",
+        # Initialize logger
+        self.logger = setup_logger(self.paths.logs)
 
-    # DENSE RECONSTRUCTION
-    "stages.dense.openmvs_export",
-    "stages.dense.dense_reconstruction",
-    "stages.dense.dense_cleanup",
-    "stages.dense.dense_eval",
+        # Initialize tool runner
+        self.tool_runner = ToolRunner(self.logger)
 
-    # MESH
-    "stages.mesh.gen_mesh",
+        # Config placeholder
+        self.config = config if config else {}
 
-    # MESH EVALUATION
-    "stages.mesh.mesh_eval",
+        self.logger.info("Runner initialized")
+        self.logger.info(f"Run directory: {self.paths.run_root}")
 
-    # TEXTURE
-    "stages.mesh.gen_tex",
+    def run(self, stages):
 
-    # GLOBAL EVALUATION
-    "evaluation.eval_agg"
-]
+        self.logger.info("Pipeline starting")
 
+        for stage in stages:
 
-# --------------------------------------------------
-# Stage Loader
-# --------------------------------------------------
+            self.logger.info(f"Starting stage: {stage.name}")
 
-def load_stage(stage_path: str, dev_reload: bool = False):
+            try:
 
-    try:
+                stage.run(
+                    paths=self.paths,
+                    config=self.config,
+                    logger=self.logger,
+                    tool_runner=self.tool_runner
+                )
 
-        module = importlib.import_module(stage_path)
+                self.logger.info(f"Stage completed: {stage.name}")
 
-        if dev_reload:
-            module = importlib.reload(module)
+            except Exception as e:
 
-    except Exception as e:
+                self.logger.error(f"Stage failed: {stage.name}")
+                self.logger.error(str(e))
 
-        raise RuntimeError(
-            f"Failed to import stage: {stage_path}"
-        ) from e
+                raise
 
-    if not hasattr(module, "run"):
+        self.logger.info("Pipeline finished successfully")
 
-        raise RuntimeError(
-            f"{stage_path} missing run()"
-        )
 
-    return module.run
+# --------------------------------------------------------
+# TEST STAGE
+# --------------------------------------------------------
 
+class TestStage(Stage):
 
-# --------------------------------------------------
-# CLI Prompts
-# --------------------------------------------------
+    name = "test_stage"
 
-def prompt_dataset():
+    def run(self, paths, config, logger, tool_runner):
 
-    while True:
+        logger.info("TestStage is running")
+        print("\n>>> TEST STAGE EXECUTED SUCCESSFULLY <<<\n")
 
-        p = input("\nDataset folder: ").strip()
-        path = Path(p).expanduser().resolve()
+        logger.info("Paths summary:")
 
-        if path.exists():
-            return path
+        for key, value in paths.summary().items():
+            logger.info(f"{key} -> {value}")
 
-        print("❌ Path does not exist")
 
-
-def prompt_workspace():
-
-    while True:
-
-        p = input("\nWorkspace folder: ").strip()
-        path = Path(p).expanduser().resolve()
-
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-            return path
-        except Exception:
-            print("❌ Cannot create workspace")
-
-
-# --------------------------------------------------
-# Pipeline Runner
-# --------------------------------------------------
-
-class PipelineRunner:
-
-    def __init__(self, dataset_path: Path, workspace_root: Path):
-
-        if not dataset_path.exists():
-            raise RuntimeError("Dataset path does not exist")
-
-        self.dataset_path = dataset_path
-
-        # Workspace
-        self.workspace = WorkspacePaths(workspace_root)
-        self.workspace.ensure()
-
-        run_id = time.strftime("run_%Y%m%d_%H%M%S")
-
-        self.paths = RunPaths(self.workspace, run_id)
-        self.paths.ensure()
-
-        # Logger
-        self.logger = create_run_logger(
-            run_id,
-            self.paths.logs
-        )
-
-        self.logger.info("PIPELINE START")
-        self.logger.info(f"run_id: {run_id}")
-        self.logger.info(f"dataset: {dataset_path}")
-
-        # Config
-        self.config = create_runtime_config(
-            self.paths.root,
-            dataset_path,
-            self.logger
-        )
-
-        validate_config(self.config, self.logger)
-
-        # Tool runner
-        self.tools = ToolRunner(
-            self.config,
-            self.logger
-        )
-
-        self.dev_reload = self.config.get("dev_reload", False)
-
-    # --------------------------------------------------
-
-    def run_stage(self, stage_path: str, index: int, total: int):
-
-        stage_name = stage_path.split(".")[-1]
-
-        self.logger.info(
-            f"[stage {index}/{total}] {stage_name} START"
-        )
-
-        start = time.time()
-
-        try:
-
-            stage_fn = load_stage(
-                stage_path,
-                dev_reload=self.dev_reload
-            )
-
-            stage_fn(
-                paths=self.paths,
-                tools=self.tools,
-                config=self.config,
-                logger=self.logger
-            )
-
-        except Exception:
-
-            self.logger.error(
-                f"[stage {index}/{total}] {stage_name} FAILED"
-            )
-
-            self.logger.error(traceback.format_exc())
-
-            raise RuntimeError(
-                f"Pipeline stopped at stage: {stage_name}"
-            )
-
-        elapsed = time.time() - start
-
-        self.logger.info(
-            f"[stage {index}/{total}] {stage_name} DONE ({elapsed:.2f}s)"
-        )
-
-    # --------------------------------------------------
-
-    def execute(self):
-
-        pipeline_start = time.time()
-
-        total = len(PIPELINE_STAGES)
-
-        try:
-
-            for i, stage in enumerate(PIPELINE_STAGES, start=1):
-
-                self.run_stage(stage, i, total)
-
-        except RuntimeError:
-
-            elapsed = time.time() - pipeline_start
-
-            self.logger.error(
-                f"PIPELINE FAILED after {elapsed:.2f}s"
-            )
-
-            raise
-
-        elapsed = time.time() - pipeline_start
-
-        self.logger.info(
-            f"PIPELINE COMPLETE ({elapsed:.2f}s)"
-        )
-
-
-# --------------------------------------------------
-# Entry Point
-# --------------------------------------------------
-
-def main():
-
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--dataset", type=str)
-    parser.add_argument("--workspace", type=str)
-
-    args = parser.parse_args()
-
-    dataset = (
-        Path(args.dataset).resolve()
-        if args.dataset
-        else prompt_dataset()
-    )
-
-    workspace = (
-        Path(args.workspace).resolve()
-        if args.workspace
-        else prompt_workspace()
-    )
-
-    runner = PipelineRunner(dataset, workspace)
-
-    runner.execute()
-
+# --------------------------------------------------------
+# MAIN EXECUTION
+# --------------------------------------------------------
 
 if __name__ == "__main__":
-    main()
+
+    project_root = Path(".")  # current folder
+
+    runner = Runner(project_root)
+
+    pipeline = [
+        TestStage()
+    ]
+
+    runner.run(pipeline)

@@ -1,138 +1,86 @@
-#!/usr/bin/env python3
-"""
-paths.py
-
-Filesystem layout manager for the MARK-2 pipeline.
-
-Design goals
-------------
-• deterministic directory structure
-• isolated runs
-• reproducible outputs
-"""
-
 from pathlib import Path
+from datetime import datetime
 
 
-# --------------------------------------------------
-# Workspace Paths
-# --------------------------------------------------
-
-class WorkspacePaths:
+class ProjectPaths:
     """
-    Root workspace containing all runs.
+    Central path manager for the photogrammetry pipeline.
+    Ensures deterministic directory layout across all runs.
     """
 
-    def __init__(self, root: Path):
+    def __init__(self, project_root: str, run_id: str | None = None):
+        self.project_root = Path(project_root).resolve()
 
-        self.root = Path(root).resolve()
+        # Input directories
+        self.input = self.project_root / "input"
+        self.images = self.input / "images"
 
-        self.runs = self.root / "runs"
+        # Run directory
+        self.runs = self.project_root / "runs"
 
-    def ensure(self):
-
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.runs.mkdir(parents=True, exist_ok=True)
-
-
-# --------------------------------------------------
-# Run Paths
-# --------------------------------------------------
-
-class RunPaths:
-    """
-    Directory structure for a single pipeline run.
-    """
-
-    def __init__(self, workspace: WorkspacePaths, run_id: str):
+        if run_id is None:
+            run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
 
         self.run_id = run_id
+        self.run_root = self.runs / self.run_id
 
-        self.root = workspace.runs / run_id
+        # Stage output directories
+        self.sparse = self.run_root / "sparse"
+        self.dense = self.run_root / "dense"
+        self.mesh = self.run_root / "mesh"
+        self.texture = self.run_root / "texture"
+        self.evaluation = self.run_root / "evaluation"
 
-        # -----------------------------
-        # INPUT
-        # -----------------------------
+        # Utility directories
+        self.logs = self.run_root / "logs"
+        self.tmp = self.run_root / "tmp"
 
-        self.input = self.root / "input"
-        self.images = self.input / "images"
-        self.videos = self.input / "videos"
+        # COLMAP specific
+        self.colmap = self.sparse / "colmap"
+        self.database = self.colmap / "database.db"
+        self.sparse_model = self.colmap / "sparse"
 
-        # -----------------------------
-        # IMAGE PROCESSING
-        # -----------------------------
+        # OpenMVS
+        self.openmvs = self.dense / "openmvs"
 
-        self.images_preprocessed = self.root / "images_preprocessed"
-        self.images_filtered = self.root / "images_filtered"
-
-        # -----------------------------
-        # COLMAP
-        # -----------------------------
-
-        self.database = self.root / "database"
-        self.database_path = self.database / "database.db"
-
-        self.sparse = self.root / "sparse"
-
-        # -----------------------------
-        # OPENMVS / DENSE
-        # -----------------------------
-
-        self.openmvs = self.root / "openmvs"
-        self.dense = self.root / "dense"
-
-        # -----------------------------
-        # OUTPUT ASSETS
-        # -----------------------------
-
-        self.mesh = self.root / "mesh"
-        self.textures = self.root / "textures"
-
-        # -----------------------------
-        # ANALYSIS
-        # -----------------------------
-
-        self.evaluation = self.root / "evaluation"
-        self.visualization = self.root / "visualization"
-
-        # -----------------------------
-        # LOGGING
-        # -----------------------------
-
-        self.logs = self.root / "logs"
-
-    # --------------------------------------------------
-
-    def ensure(self):
+    def create_all(self):
         """
-        Create directory structure for the run.
+        Create all directories required for the pipeline run.
         """
 
         dirs = [
-
-            self.root,
-
             self.input,
             self.images,
-            self.videos,
-
-            self.images_preprocessed,
-            self.images_filtered,
-
-            self.database,
+            self.runs,
+            self.run_root,
             self.sparse,
-
-            self.openmvs,
             self.dense,
-
             self.mesh,
-            self.textures,
-
+            self.texture,
             self.evaluation,
-            self.visualization,
-
             self.logs,
+            self.tmp,
+            self.colmap,
+            self.sparse_model,
+            self.openmvs,
         ]
 
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
+
+    def summary(self):
+        """
+        Return dictionary of important paths for debugging/logging.
+        """
+
+        return {
+            "project_root": self.project_root,
+            "run_root": self.run_root,
+            "images": self.images,
+            "database": self.database,
+            "sparse_model": self.sparse_model,
+            "dense": self.dense,
+            "mesh": self.mesh,
+            "texture": self.texture,
+            "evaluation": self.evaluation,
+        }
