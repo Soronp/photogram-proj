@@ -1,35 +1,37 @@
 import subprocess
 import time
-from pathlib import Path
 
 
 class ToolRunner:
     """
-    Responsible for executing external photogrammetry tools
-    such as COLMAP and OpenMVS in a controlled manner.
+    Executes external tools such as COLMAP
+    with controlled logging and error handling.
     """
 
     def __init__(self, logger):
         self.logger = logger
 
-    def run(self, command, cwd=None, env=None, check=True):
+    def run(
+        self,
+        command,
+        cwd=None,
+        env=None,
+        check=True,
+        capture_output=False
+    ):
         """
-        Execute an external command.
+        Run external command.
 
         Parameters
         ----------
         command : list[str]
-            Command and arguments.
         cwd : Path | None
-            Working directory.
         env : dict | None
-            Environment variables.
         check : bool
-            If True, raise error on failure.
+        capture_output : bool
         """
 
         cmd_str = " ".join(map(str, command))
-
         self.logger.info(f"Running command: {cmd_str}")
 
         start_time = time.time()
@@ -44,19 +46,34 @@ class ToolRunner:
             bufsize=1
         )
 
-        # Stream output live to logger
+        collected_output = []
+
         for line in process.stdout:
-            self.logger.info(line.strip())
+            line = line.rstrip()
+
+            if capture_output:
+                collected_output.append(line)
+
+            self.logger.info(line)
 
         process.wait()
 
         runtime = time.time() - start_time
 
         if process.returncode != 0:
-            self.logger.error(f"Command failed with exit code {process.returncode}")
+
+            self.logger.error(
+                f"Command failed with exit code {process.returncode}"
+            )
+
             if check:
                 raise RuntimeError(f"Command failed: {cmd_str}")
 
-        self.logger.info(f"Command finished in {runtime:.2f} seconds")
+        self.logger.info(
+            f"Command finished in {runtime:.2f} seconds"
+        )
+
+        if capture_output:
+            return "\n".join(collected_output)
 
         return process.returncode

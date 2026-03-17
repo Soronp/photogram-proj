@@ -24,6 +24,9 @@ class ProjectPaths:
         self.run_id = run_id
         self.run_root = self.runs / self.run_id
 
+        self.preprocessed = self.run_root / "preprocessed"
+        self.preprocessed_images = self.preprocessed / "images"
+
         # Stage output directories
         self.sparse = self.run_root / "sparse"
         self.dense = self.run_root / "dense"
