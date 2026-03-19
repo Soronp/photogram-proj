@@ -7,11 +7,11 @@ DEFAULT_CONFIG = {
     },
 
     "paths": {
-        "project_root": None,   # will be filled dynamically
+        "project_root": None,
     },
 
     "ingestion": {
-        "copy_mode": "copy"   # "copy" or "symlink"
+        "copy_mode": "copy"
     },
 
     "downsampling": {
@@ -19,6 +19,9 @@ DEFAULT_CONFIG = {
         "target_max_dim": 2000
     },
 
+    # -----------------------------
+    # SIFT / FEATURES
+    # -----------------------------
     "sift": {
         "max_num_features": 8000,
         "max_image_size": 2000,
@@ -26,9 +29,40 @@ DEFAULT_CONFIG = {
         "use_gpu": False
     },
 
+    # -----------------------------
+    # MATCHING
+    # -----------------------------
     "matching": {
         "type": "exhaustive",
         "use_gpu": False
+    },
+
+    # -----------------------------
+    # SPARSE (SfM)
+    # -----------------------------
+    "sparse": {
+        "backend": "colmap"  # or "glomap"
+    },
+
+    # -----------------------------
+    # DENSE (COLMAP)
+    # -----------------------------
+    "dense": {
+        "max_image_size": 2000,
+        "use_gpu": False,
+        "num_threads": -1,
+        "window_radius": 5,
+        "num_samples": 15,
+        "min_num_pixels": 5
+    },
+
+    # -----------------------------
+    # MESH
+    # -----------------------------
+    "mesh": {
+        "method": "poisson",
+        "poisson_depth": 9,
+        "voxel_size": 0.01
     }
 }
 

@@ -16,22 +16,18 @@ class ToolRunner:
         allow_failure: bool = False,
     ):
         """
-        Execute a shell command with logging and error handling.
+        Execute external command with logging + timing.
         """
 
-        if isinstance(cmd, list):
-            cmd_str = " ".join(cmd)
-        else:
-            cmd_str = cmd
+        cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
 
-        self.logger.info(f"[{stage}] Running command:")
+        self.logger.info(f"[{stage}] COMMAND:")
         self.logger.info(cmd_str)
 
         start_time = time.time()
 
         process = subprocess.Popen(
             cmd,
-            shell=isinstance(cmd, str),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             cwd=cwd,
@@ -39,9 +35,10 @@ class ToolRunner:
             text=True,
         )
 
-        # Stream output live
-        for line in process.stdout:
-            self.logger.info(f"[{stage}] {line.strip()}")
+        # Stream output
+        for line in iter(process.stdout.readline, ""):
+            if line:
+                self.logger.info(f"[{stage}] {line.strip()}")
 
         process.wait()
         elapsed = time.time() - start_time
@@ -49,7 +46,7 @@ class ToolRunner:
         self.logger.info(f"[{stage}] Finished in {elapsed:.2f}s")
 
         if process.returncode != 0:
-            msg = f"[{stage}] Command failed with code {process.returncode}"
+            msg = f"[{stage}] FAILED (code {process.returncode})"
             self.logger.error(msg)
 
             if not allow_failure:

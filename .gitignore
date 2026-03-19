@@ -30,7 +30,6 @@ logs/
 # -------------------------
 # External tools / binaries
 # -------------------------
-colmap/
 glomap/
 ffmpeg/
 OpenMVS_Windows_x64/

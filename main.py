@@ -1,4 +1,6 @@
 from pathlib import Path
+import shutil
+
 from core.runner import PipelineRunner
 from config.config_manager import load_config
 
@@ -6,33 +8,56 @@ from config.config_manager import load_config
 def get_user_paths():
     print("=== Photogrammetry Pipeline Setup ===")
 
-    raw_input_path = input("Enter path to your image folder: ").strip()
+    # -----------------------------
+    # INPUT DATASET
+    # -----------------------------
+    input_path_str = input("Enter path to your IMAGE folder: ").strip()
 
-    if not raw_input_path:
+    if not input_path_str:
         raise ValueError("Input path cannot be empty")
 
-    raw_path = Path(raw_input_path)
+    input_path = Path(input_path_str)
 
-    if not raw_path.exists():
-        raise FileNotFoundError(f"Path does not exist: {raw_path}")
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input path does not exist: {input_path}")
 
-    project_root = Path("data/projects/project_1")
+    # -----------------------------
+    # OUTPUT PROJECT ROOT
+    # -----------------------------
+    output_path_str = input("Enter path for OUTPUT project folder: ").strip()
 
-    # Create required structure
+    if not output_path_str:
+        raise ValueError("Output path cannot be empty")
+
+    project_root = Path(output_path_str)
+
+    # Create project structure
     raw_images_dir = project_root / "raw_images"
     raw_images_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Copying images into project structure...")
+    print("\nPreparing project structure...")
 
-    for img in raw_path.iterdir():
+    # -----------------------------
+    # COPY IMAGES (SAFE METHOD)
+    # -----------------------------
+    copied = 0
+    skipped = 0
+
+    for img in input_path.iterdir():
         target = raw_images_dir / img.name
-        if not target.exists():
-            try:
-                target.write_bytes(img.read_bytes())
-            except Exception:
-                print(f"Skipping invalid file: {img.name}")
 
-    print(f"Images prepared at: {raw_images_dir}")
+        if target.exists():
+            skipped += 1
+            continue
+
+        try:
+            shutil.copy2(img, target)
+            copied += 1
+        except Exception:
+            print(f"Skipping invalid file: {img.name}")
+
+    print(f"\nImages copied: {copied}, skipped: {skipped}")
+    print(f"Project created at: {project_root}\n")
 
     return project_root
 
@@ -47,6 +72,9 @@ if __name__ == "__main__":
         "downsampling": {
             "enabled": True,
             "target_max_dim": 2000
+        },
+        "sparse": {
+            "backend": "colmap"   # or "glomap"
         }
     }
 
