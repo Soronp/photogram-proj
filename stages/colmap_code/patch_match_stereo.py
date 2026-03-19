@@ -7,7 +7,7 @@ class PatchMatchStereoStage(Stage):
 
     def run(self, paths, config, logger, tool_runner):
 
-        logger.info("Starting PatchMatch stereo (ultra loose settings)")
+        logger.info("Starting PatchMatch stereo")
 
         cmd = [
             "colmap",
@@ -16,32 +16,29 @@ class PatchMatchStereoStage(Stage):
             "--workspace_path", str(paths.dense),
             "--workspace_format", "COLMAP",
 
-            # Use GPU automatically
-            "--PatchMatchStereo.gpu_index", "0",
-
-            # Resolution
+            # Resolution control
             "--PatchMatchStereo.max_image_size", "2048",
 
-            # Sampling
+            # Sampling / optimization
             "--PatchMatchStereo.window_radius", "5",
-            "--PatchMatchStereo.num_samples", "30",
-            "--PatchMatchStereo.num_iterations", "7",
+            "--PatchMatchStereo.num_samples", "15",
+            "--PatchMatchStereo.num_iterations", "5",
 
-            # Geometry
+            # Geometry consistency
             "--PatchMatchStereo.geom_consistency", "1",
 
-            # Ultra-loose filters
+            # Filtering (balanced)
             "--PatchMatchStereo.filter", "1",
-            "--PatchMatchStereo.filter_min_ncc", "-1",
-            "--PatchMatchStereo.filter_min_triangulation_angle", "0.1",
-            "--PatchMatchStereo.filter_min_num_consistent", "1",
-            "--PatchMatchStereo.filter_geom_consistency_max_cost", "100",
+            "--PatchMatchStereo.filter_min_ncc", "0.1",
+            "--PatchMatchStereo.filter_min_triangulation_angle", "3",
+            "--PatchMatchStereo.filter_min_num_consistent", "2",
+            "--PatchMatchStereo.filter_geom_consistency_max_cost", "1",
 
-            # Allow incomplete data
-            "--PatchMatchStereo.allow_missing_files", "1",
+            # Stability
+            "--PatchMatchStereo.allow_missing_files", "0",
 
-            # Debugging / stronger fusion later
-            "--PatchMatchStereo.write_consistency_graph", "1"
+            # Debug (optional)
+            "--PatchMatchStereo.write_consistency_graph", "0"
         ]
 
         tool_runner.run(cmd)

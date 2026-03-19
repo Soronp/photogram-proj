@@ -1,79 +1,58 @@
 import subprocess
 import time
+from pathlib import Path
 
 
 class ToolRunner:
-    """
-    Executes external tools such as COLMAP
-    with controlled logging and error handling.
-    """
-
     def __init__(self, logger):
         self.logger = logger
 
     def run(
         self,
-        command,
-        cwd=None,
-        env=None,
-        check=True,
-        capture_output=False
+        cmd,
+        cwd: Path = None,
+        env: dict = None,
+        stage: str = "unknown",
+        allow_failure: bool = False,
     ):
         """
-        Run external command.
-
-        Parameters
-        ----------
-        command : list[str]
-        cwd : Path | None
-        env : dict | None
-        check : bool
-        capture_output : bool
+        Execute a shell command with logging and error handling.
         """
 
-        cmd_str = " ".join(map(str, command))
-        self.logger.info(f"Running command: {cmd_str}")
+        if isinstance(cmd, list):
+            cmd_str = " ".join(cmd)
+        else:
+            cmd_str = cmd
+
+        self.logger.info(f"[{stage}] Running command:")
+        self.logger.info(cmd_str)
 
         start_time = time.time()
 
         process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            env=env,
+            cmd,
+            shell=isinstance(cmd, str),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            cwd=cwd,
+            env=env,
             text=True,
-            bufsize=1
         )
 
-        collected_output = []
-
+        # Stream output live
         for line in process.stdout:
-            line = line.rstrip()
-
-            if capture_output:
-                collected_output.append(line)
-
-            self.logger.info(line)
+            self.logger.info(f"[{stage}] {line.strip()}")
 
         process.wait()
+        elapsed = time.time() - start_time
 
-        runtime = time.time() - start_time
+        self.logger.info(f"[{stage}] Finished in {elapsed:.2f}s")
 
         if process.returncode != 0:
+            msg = f"[{stage}] Command failed with code {process.returncode}"
+            self.logger.error(msg)
 
-            self.logger.error(
-                f"Command failed with exit code {process.returncode}"
-            )
+            if not allow_failure:
+                raise RuntimeError(msg)
 
-            if check:
-                raise RuntimeError(f"Command failed: {cmd_str}")
-
-        self.logger.info(
-            f"Command finished in {runtime:.2f} seconds"
-        )
-
-        if capture_output:
-            return "\n".join(collected_output)
-
-        return process.returncode
+        return elapsed

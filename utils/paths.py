@@ -3,87 +3,74 @@ from datetime import datetime
 
 
 class ProjectPaths:
-    """
-    Central path manager for the photogrammetry pipeline.
-    Ensures deterministic directory layout across all runs.
-    """
+    def __init__(self, project_root: Path, run_name: str = None):
+        self.project_root = Path(project_root)
 
-    def __init__(self, project_root: str, run_id: str | None = None):
-        self.project_root = Path(project_root).resolve()
+        # ---- RAW (IMMUTABLE) ----
+        self.raw_images = self.project_root / "raw_images"
 
-        # Input directories
-        self.input = self.project_root / "input"
-        self.images = self.input / "images"
+        # ---- RUN MANAGEMENT ----
+        self.runs_root = self.project_root / "runs"
+        self.runs_root.mkdir(parents=True, exist_ok=True)
 
-        # Run directory
-        self.runs = self.project_root / "runs"
+        if run_name is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_name = f"run_{timestamp}"
 
-        if run_id is None:
-            run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+        self.run_name = run_name
+        self.run_root = self.runs_root / run_name
+        self.run_root.mkdir(parents=True, exist_ok=True)
 
-        self.run_id = run_id
-        self.run_root = self.runs / self.run_id
+        # ---- WORKING DIRECTORIES ----
+        self.working = self.run_root / "working"
+        self.images = self.working / "images"
+        self.images_downsampled = self.working / "images_downsampled"
 
-        self.preprocessed = self.run_root / "preprocessed"
-        self.preprocessed_images = self.preprocessed / "images"
-
-        # Stage output directories
+        # ---- SPARSE ----
         self.sparse = self.run_root / "sparse"
+        self.database = self.sparse / "database.db"
+        self.sparse_model = self.sparse / "model"
+
+        # ---- DENSE ----
         self.dense = self.run_root / "dense"
+        self.mvs = self.dense / "scene.mvs"
+        self.dense_model = self.dense / "dense.mvs"
+
+        # ---- MESH ----
         self.mesh = self.run_root / "mesh"
+        self.mesh_file = self.mesh / "mesh.ply"
+
+        # ---- TEXTURE ----
         self.texture = self.run_root / "texture"
-        self.evaluation = self.run_root / "evaluation"
 
-        # Utility directories
+        # ---- LOGS ----
         self.logs = self.run_root / "logs"
-        self.tmp = self.run_root / "tmp"
+        self.log_file = self.logs / "pipeline.log"
 
-        # COLMAP specific
-        self.colmap = self.sparse / "colmap"
-        self.database = self.colmap / "database.db"
-        self.sparse_model = self.colmap / "sparse"
+        # ---- METRICS ----
+        self.metrics = self.run_root / "metrics.json"
 
-        # OpenMVS
-        self.openmvs = self.dense / "openmvs"
+        self._create_dirs()
 
-    def create_all(self):
-        """
-        Create all directories required for the pipeline run.
-        """
-
+    def _create_dirs(self):
         dirs = [
-            self.input,
+            self.working,
             self.images,
-            self.runs,
-            self.run_root,
+            self.images_downsampled,
             self.sparse,
             self.dense,
             self.mesh,
             self.texture,
-            self.evaluation,
             self.logs,
-            self.tmp,
-            self.colmap,
-            self.sparse_model,
-            self.openmvs,
         ]
 
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
 
     def summary(self):
-        """
-        Return dictionary of important paths for debugging/logging.
-        """
-
         return {
-            "project_root": self.project_root,
-            "run_root": self.run_root,
-            "images": self.images,
-            "database": self.database,
-            "sparse_model": self.sparse_model,
-            "dense": self.dense,
-            "mesh": self.mesh,
-            "texture": self.texture,
-            "evaluation": self.evaluation,
+            "project_root": str(self.project_root),
+            "run_root": str(self.run_root),
+            "images": str(self.images),
+            "images_downsampled": str(self.images_downsampled),
         }

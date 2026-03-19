@@ -1,137 +1,68 @@
-import sys
-from pathlib import Path
-
-# ------------------------------------------------------------------
-# Fix import path so project modules can be found
-# ------------------------------------------------------------------
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.append(str(ROOT))
-
-# ------------------------------------------------------------------
-
 from utils.paths import ProjectPaths
 from utils.logger import setup_logger
 from core.tool_runner import ToolRunner
-from core.stage import Stage
-from stages.preprocessing.image_downsample import ImageDownsampleStage
-from stages.colmap_code.feature_extraction import FeatureExtractionStage
-from stages.colmap_code.feature_matching import FeatureMatchingStage
-from stages.colmap_code.mapper import MapperStage
-from stages.colmap_code.image_undistorter import ImageUndistorterStage
-from stages.colmap_code.patch_match_stereo import PatchMatchStereoStage
-from stages.colmap_code.stereo_fusion import StereoFusionStage
 
-class Runner:
-    """
-    Pipeline runner responsible for executing stages sequentially.
-    """
+# --- ingestion ---
+from stages.ingestion.ingest_images import run as ingest_images
+from stages.ingestion.validate_images import run as validate_images
+from stages.ingestion.downsample import run as downsample_images
 
-    def __init__(self, dataset_path, output_root, config=None):
+# ----- sparse -----
+from stages.colmap_code.feature_extraction import run as feature_extraction
+from stages.colmap_code.feature_matching import run as matching
 
-        self.dataset_path = Path(dataset_path).resolve()
-        self.output_root = Path(output_root).resolve()
+# --- sparse (prepare for next step) ---
+# from stages.sparse.feature_extraction import run as feature_extraction
+# from stages.sparse.matching import run as matching
 
-        # Initialize paths
-        self.paths = ProjectPaths(self.output_root)
-        self.paths.images = self.dataset_path
-        self.paths.create_all()
 
-        # Initialize logger
-        self.logger = setup_logger(self.paths.logs)
+class PipelineRunner:
+    def __init__(self, config):
+        project_root = config["paths"]["project_root"]
 
-        # Initialize tool runner
+        self.paths = ProjectPaths(project_root)
+        self.logger = setup_logger(self.paths.log_file)
+        self.config = config
+
         self.tool_runner = ToolRunner(self.logger)
 
-        self.config = config if config else {}
-
-        self.logger.info("Runner initialized")
-        self.logger.info(f"Dataset: {self.dataset_path}")
+    def run(self):
+        self.logger.info("========== PIPELINE START ==========")
         self.logger.info(f"Run directory: {self.paths.run_root}")
 
-    def run(self, stages):
+        try:
+            self._run_ingestion()
 
-        self.logger.info("Pipeline starting")
+            # Uncomment when ready
+            # self._run_sparse()
 
-        for stage in stages:
+        except Exception as e:
+            self.logger.error(f"Pipeline failed: {e}")
+            raise
 
-            self.logger.info(f"Starting stage: {stage.name}")
+        self.logger.info("========== PIPELINE END ==========")
 
-            try:
+    # -----------------------------
+    # INGESTION
+    # -----------------------------
+    def _run_ingestion(self):
+        self.logger.info("---- INGESTION STAGE ----")
 
-                stage.run(
-                    paths=self.paths,
-                    config=self.config,
-                    logger=self.logger,
-                    tool_runner=self.tool_runner
-                )
+        ingest_images(self.paths, self.config, self.logger)
+        validate_images(self.paths, self.config, self.logger)
 
-                self.logger.info(f"Stage completed: {stage.name}")
+        if self.config.get("downsampling", {}).get("enabled", True):
+            downsample_images(self.paths, self.config, self.logger)
 
-            except Exception as e:
+        self.logger.info("---- INGESTION COMPLETE ----")
 
-                self.logger.error(f"Stage failed: {stage.name}")
-                self.logger.error(str(e))
+    # -----------------------------
+    # SPARSE (future)
+    # -----------------------------
+    def _run_sparse(self):
+        self.logger.info("---- SPARSE STAGE ----")
 
-                raise
+        feature_extraction(self.paths, self.config, self.logger, self.tool_runner)
+        matching(self.paths, self.config, self.logger, self.tool_runner)
 
-        self.logger.info("Pipeline finished successfully")
-
-
-# ------------------------------------------------------------------
-# TEST STAGE
-# ------------------------------------------------------------------
-
-class TestStage(Stage):
-
-    name = "test_stage"
-
-    def run(self, paths, config, logger, tool_runner):
-
-        logger.info("TestStage running")
-
-        print("\n===== TEST STAGE EXECUTED SUCCESSFULLY =====\n")
-
-        logger.info("Paths summary:")
-
-        for key, value in paths.summary().items():
-            logger.info(f"{key} -> {value}")
-
-
-# ------------------------------------------------------------------
-# MAIN PROGRAM
-# ------------------------------------------------------------------
-
-def get_user_paths():
-
-    print("\n--- Photogrammetry Pipeline ---\n")
-
-    dataset = input("Enter dataset image folder path: ").strip()
-    output = input("Enter output project directory: ").strip()
-
-    dataset = Path(dataset)
-    output = Path(output)
-
-    if not dataset.exists():
-        raise ValueError("Dataset path does not exist")
-
-    return dataset, output
-
-
-if __name__ == "__main__":
-
-    dataset_path, output_root = get_user_paths()
-
-    runner = Runner(dataset_path, output_root)
-
-    pipeline = [
-        ImageDownsampleStage(),
-        FeatureExtractionStage(),
-        FeatureMatchingStage(),
-        MapperStage(),
-        ImageUndistorterStage(),
-        PatchMatchStereoStage(),
-        StereoFusionStage(),
-    ]
-
-    runner.run(pipeline)
+        self.logger.info("---- SPARSE COMPLETE ----")
