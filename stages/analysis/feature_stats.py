@@ -1,5 +1,9 @@
 import sqlite3
 import numpy as np
+import cv2
+from pathlib import Path
+
+VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"}
 
 
 def run(paths, config, logger):
@@ -14,74 +18,71 @@ def run(paths, config, logger):
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
 
-    # -----------------------------
-    # Get number of images
-    # -----------------------------
-    cursor.execute("SELECT COUNT(*) FROM images")
-    num_images = cursor.fetchone()[0]
+    try:
+        # -----------------------------
+        # Image count
+        # -----------------------------
+        cursor.execute("SELECT COUNT(*) FROM images")
+        num_images = cursor.fetchone()[0]
 
-    if num_images == 0:
-        raise RuntimeError(f"{stage}: no images in database")
+        if num_images == 0:
+            raise RuntimeError(f"{stage}: no images in database")
 
-    # -----------------------------
-    # Keypoints
-    # -----------------------------
-    cursor.execute("SELECT rows FROM keypoints")
-    keypoints_counts = [row[0] for row in cursor.fetchall()]
+        # -----------------------------
+        # Keypoints per image
+        # -----------------------------
+        cursor.execute("SELECT rows FROM keypoints")
+        keypoints_counts = [row[0] for row in cursor.fetchall()]
 
-    total_keypoints = sum(keypoints_counts)
-    avg_keypoints = np.mean(keypoints_counts) if keypoints_counts else 0
+        if len(keypoints_counts) == 0:
+            logger.warning(f"{stage}: no keypoints found")
+            avg_keypoints = 0
+            total_keypoints = 0
+        else:
+            total_keypoints = int(sum(keypoints_counts))
+            avg_keypoints = float(np.mean(keypoints_counts))
 
-    # -----------------------------
-    # Matches
-    # -----------------------------
-    cursor.execute("SELECT COUNT(*) FROM matches")
-    num_matches = cursor.fetchone()[0]
-
-    # -----------------------------
-    # Connectivity
-    # -----------------------------
-    max_possible_edges = num_images * (num_images - 1) / 2
-
-    connectivity = (
-        num_matches / max_possible_edges if max_possible_edges > 0 else 0
-    )
-
-    # -----------------------------
-    # Feature density
-    # -----------------------------
-    downsample_enabled = config.get("downsampling", {}).get("enabled", True)
-
-    if downsample_enabled:
-        image_dir = paths.images_downsampled
-    else:
+        # -----------------------------
+        # Image area estimation (ROBUST)
+        # -----------------------------
         image_dir = paths.images
 
-    # Estimate image area (use first image)
-    import cv2
-    sample_img = next(image_dir.glob("*"))
-    img = cv2.imread(str(sample_img))
-    h, w = img.shape[:2]
+        image_files = [
+            p for p in image_dir.iterdir()
+            if p.suffix in VALID_EXTENSIONS
+        ]
 
-    image_area = h * w
+        areas = []
 
-    feature_density = avg_keypoints / image_area if image_area > 0 else 0
+        for img_path in image_files[:10]:  # sample first 10
+            img = cv2.imread(str(img_path))
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+            areas.append(h * w)
 
-    # -----------------------------
-    # Output stats
-    # -----------------------------
-    stats = {
-        "num_images": num_images,
-        "total_keypoints": int(total_keypoints),
-        "avg_keypoints_per_image": float(avg_keypoints),
-        "num_matches": int(num_matches),
-        "connectivity": float(connectivity),
-        "feature_density": float(feature_density),
-    }
+        if len(areas) == 0:
+            logger.warning(f"{stage}: could not compute image areas")
+            avg_area = 1  # prevent division by zero
+        else:
+            avg_area = float(np.mean(areas))
 
-    logger.info(f"{stage}: stats computed")
-    logger.info(f"{stage}: {stats}")
+        feature_density = avg_keypoints / avg_area
 
-    conn.close()
+        # -----------------------------
+        # Stats
+        # -----------------------------
+        stats = {
+            "num_images": int(num_images),
+            "total_keypoints": total_keypoints,
+            "avg_keypoints_per_image": avg_keypoints,
+            "feature_density": float(feature_density),
+        }
 
-    return stats
+        logger.info(f"{stage}: SUCCESS")
+        logger.info(f"{stage}: {stats}")
+
+        return stats
+
+    finally:
+        conn.close()

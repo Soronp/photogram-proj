@@ -1,4 +1,5 @@
 from pathlib import Path
+import open3d as o3d
 
 
 def run(paths, config, logger, tool_runner):
@@ -12,14 +13,51 @@ def run(paths, config, logger, tool_runner):
 
     output_path = dense_dir / "fused.ply"
 
-    if output_path.exists():
-        logger.warning(f"{stage}: already exists, skipping")
-        return
+    # 🔥 RETRY-AWARE CLEANUP
+    retry_count = config.get("_meta", {}).get("retry_count", 0)
 
-    use_gpu = config.get("dense", {}).get("use_gpu", True)
+    if output_path.exists():
+        logger.warning(f"{stage}: removing previous fusion (retry={retry_count})")
+        output_path.unlink()
 
     # -----------------------------
-    # COMMAND (BALANCED DENSITY)
+    # 🔥 ANALYSIS SIGNALS (CORRECT STRUCTURE)
+    # -----------------------------
+    analysis = config.get("analysis_results", {})
+
+    matches = analysis.get("matches", {})
+
+    connectivity = matches.get("connectivity", 0.3)
+    avg_degree = matches.get("avg_degree", 4)
+
+    logger.info(f"{stage}: connectivity={connectivity}, avg_degree={avg_degree}")
+
+    # -----------------------------
+    # 🔥 FUSION PARAMETERS
+    # -----------------------------
+    fusion_cfg = config.get("fusion", {})
+
+    min_pixels = fusion_cfg.get("min_num_pixels", 5)
+
+    if connectivity < 0.2:
+        max_reproj = 3.0
+        max_depth = 0.05
+        mode = "weak"
+
+    elif connectivity < 0.4:
+        max_reproj = 2.5
+        max_depth = 0.03
+        mode = "moderate"
+
+    else:
+        max_reproj = 2.0
+        max_depth = 0.02
+        mode = "strong"
+
+    logger.info(f"{stage}: mode={mode}")
+
+    # -----------------------------
+    # 🔥 COMMAND
     # -----------------------------
     cmd = [
         "colmap",
@@ -33,16 +71,12 @@ def run(paths, config, logger, tool_runner):
 
         "--output_path", str(output_path),
 
-        # 🔥 KEEP MORE POINTS (BUT NOT NOISY)
-        "--StereoFusion.min_num_pixels", "3",
-
-        "--StereoFusion.max_reproj_error", "2.5",
-        "--StereoFusion.max_depth_error", "0.02",
+        "--StereoFusion.min_num_pixels", str(min_pixels),
+        "--StereoFusion.max_reproj_error", str(max_reproj),
+        "--StereoFusion.max_depth_error", str(max_depth),
         "--StereoFusion.max_normal_error", "10",
 
-        # 🔥 PERFORMANCE
         "--StereoFusion.num_threads", "-1",
-        "--StereoFusion.max_image_size", "2000",
     ]
 
     tool_runner.run(cmd, stage=stage)
@@ -51,14 +85,19 @@ def run(paths, config, logger, tool_runner):
         raise RuntimeError(f"{stage}: fusion failed")
 
     # -----------------------------
-    # DEBUG METRIC
+    # 🔥 METRICS
     # -----------------------------
-    import open3d as o3d
     pcd = o3d.io.read_point_cloud(str(output_path))
+    num_points = len(pcd.points)
 
-    logger.info(f"{stage}: fused points = {len(pcd.points)}")
+    logger.info(f"{stage}: fused points = {num_points}")
 
-    if len(pcd.points) < 300000:
-        logger.warning(f"{stage}: LOW DENSITY POINT CLOUD")
+    # Better thresholds
+    if num_points < 100000:
+        logger.warning(f"{stage}: VERY LOW density")
+    elif num_points < 300000:
+        logger.warning(f"{stage}: moderate density")
+    else:
+        logger.info(f"{stage}: GOOD density")
 
     logger.info(f"{stage}: SUCCESS")

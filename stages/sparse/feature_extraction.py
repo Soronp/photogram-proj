@@ -1,48 +1,51 @@
 from pathlib import Path
 
+
 def run(paths, config, logger, tool_runner):
     stage = "feature_extraction"
     logger.info(f"---- {stage.upper()} ----")
 
-    # 🔥 ALWAYS use canonical image folder
     image_dir = paths.images
-
-    if not image_dir.exists():
-        raise RuntimeError(f"{stage}: image directory not found: {image_dir}")
-
-    images = list(image_dir.iterdir())
-    if len(images) == 0:
-        raise RuntimeError(f"{stage}: no images found in {image_dir}")
-
-    logger.info(f"{stage}: using {len(images)} images")
-
-    # -----------------------------
-    # Database
-    # -----------------------------
     database_path = paths.database
 
+    if not image_dir.exists():
+        raise RuntimeError(f"{stage}: image directory not found")
+
+    images = list(image_dir.glob("*"))
+    if not images:
+        raise RuntimeError(f"{stage}: no images found")
+
+    logger.info(f"{stage}: {len(images)} images")
+
+    # Reset database
     if database_path.exists():
-        logger.warning(f"{stage}: database exists, deleting for clean run")
+        logger.warning(f"{stage}: removing old database")
         database_path.unlink()
 
-    # -----------------------------
-    # SIFT config (MAXIMIZE FEATURES)
-    # -----------------------------
-    sift_config = config.get("sift", {})
+    sift = config.get("sift", {})
+    backend = config.get("sparse", {}).get("backend", "colmap")
+
+    # 🔥 Backend-aware tuning
+    if backend == "glomap":
+        peak_threshold = sift.get("peak_threshold", 0.006)  # stricter
+        logger.info(f"{stage}: GLOMAP mode → stricter features")
+    else:
+        peak_threshold = sift.get("peak_threshold", 0.004)
+        logger.info(f"{stage}: COLMAP mode → robust features")
 
     cmd = [
-        "colmap",
-        "feature_extractor",
+        "colmap", "feature_extractor",
+
         "--database_path", str(database_path),
         "--image_path", str(image_dir),
 
-        # 🔥 MAX ROBUSTNESS SETTINGS
-        "--SiftExtraction.use_gpu", "0",
-        "--SiftExtraction.max_num_features", str(sift_config.get("max_num_features", 12000)),
-        "--SiftExtraction.max_image_size", str(sift_config.get("max_image_size", 2000)),
+        "--SiftExtraction.use_gpu", str(int(sift.get("use_gpu", False))),
+        "--SiftExtraction.max_num_features", str(sift.get("max_num_features", 10000)),
+        "--SiftExtraction.max_image_size", str(sift.get("max_image_size", 2000)),
         "--SiftExtraction.num_threads", "-1",
 
-        # 🔥 IMPORTANT
+        "--SiftExtraction.peak_threshold", str(peak_threshold),
+
         "--SiftExtraction.estimate_affine_shape", "1",
         "--SiftExtraction.domain_size_pooling", "1",
     ]

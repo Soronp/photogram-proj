@@ -1,5 +1,6 @@
 from pathlib import Path
 
+
 def run(paths, config, logger, tool_runner):
     stage = "mapper"
     logger.info(f"---- {stage.upper()} ----")
@@ -16,45 +17,89 @@ def run(paths, config, logger, tool_runner):
 
     sparse_root.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"{stage}: running COLMAP mapper")
+    backend = config.get("sparse", {}).get("backend", "colmap")
 
-    # 🔥 VERY RELAXED MAPPER SETTINGS
-    cmd = [
-        "colmap",
-        "mapper",
-        "--database_path", str(database_path),
-        "--image_path", str(image_dir),
-        "--output_path", str(sparse_root),
+    logger.info(f"{stage}: backend = {backend}")
 
-        "--Mapper.num_threads", "-1",
+    # =====================================================
+    # 🔷 GLOMAP BACKEND
+    # =====================================================
+    if backend == "glomap":
+        logger.info(f"{stage}: running GLOMAP mapper")
 
-        # 🔥 CRITICAL (LOWER THESE)
-        "--Mapper.init_min_num_inliers", "15",
-        "--Mapper.abs_pose_min_num_inliers", "15",
+        cmd = [
+            "glomap", "mapper",
 
-        # 🔥 ALLOW HARD DATASETS
-        "--Mapper.ba_global_max_num_iterations", "100",
-        "--Mapper.ba_local_max_num_iterations", "50",
+            "--database_path", str(database_path),
+            "--output_path", str(sparse_root),
+        ]
 
-        # 🔥 KEEP MORE IMAGES
-        "--Mapper.min_model_size", "5",
+        tool_runner.run(cmd, stage=stage + "_glomap")
 
-        # 🔥 IMPORTANT
-        "--Mapper.multiple_models", "0",
-    ]
+    # =====================================================
+    # 🔷 COLMAP BACKEND
+    # =====================================================
+    else:
+        logger.info(f"{stage}: running COLMAP mapper")
 
-    tool_runner.run(cmd, stage=stage)
+        # 🔥 Read analysis signals
+        analysis = config.get("analysis", {})
+        connectivity = analysis.get("connectivity", 0.3)
+        avg_degree = analysis.get("avg_degree", 4)
 
-    # -----------------------------
-    # Validate output
-    # -----------------------------
-    sparse_model = paths.sparse / "0"
+        # Adaptive tuning
+        if connectivity < 0.2:
+            init_inliers = 12
+            abs_inliers = 12
+            min_model_size = 3
+            ba_global_iter = 150
+
+        elif connectivity < 0.4:
+            init_inliers = 20
+            abs_inliers = 15
+            min_model_size = 5
+            ba_global_iter = 100
+
+        else:
+            init_inliers = 30
+            abs_inliers = 20
+            min_model_size = 10
+            ba_global_iter = 50
+
+        ba_local_iter = 50 if avg_degree < 4 else 30
+
+        cmd = [
+            "colmap", "mapper",
+
+            "--database_path", str(database_path),
+            "--image_path", str(image_dir),
+            "--output_path", str(sparse_root),
+
+            "--Mapper.num_threads", "-1",
+
+            "--Mapper.init_min_num_inliers", str(init_inliers),
+            "--Mapper.abs_pose_min_num_inliers", str(abs_inliers),
+
+            "--Mapper.min_model_size", str(min_model_size),
+
+            "--Mapper.ba_global_max_num_iterations", str(ba_global_iter),
+            "--Mapper.ba_local_max_num_iterations", str(ba_local_iter),
+
+            "--Mapper.multiple_models", "0",
+        ]
+
+        tool_runner.run(cmd, stage=stage + "_colmap")
+
+    # =====================================================
+    # VALIDATION (SHARED)
+    # =====================================================
+    sparse_model = sparse_root / "0"
 
     if not sparse_model.exists():
-        raise RuntimeError(f"{stage}: no sparse model folder created")
+        raise RuntimeError(f"{stage}: no sparse model produced")
 
-    files = list(sparse_model.iterdir())
-    if len(files) == 0:
-        raise RuntimeError(f"{stage}: sparse model is empty")
+    files = list(sparse_model.glob("*"))
+    if not files:
+        raise RuntimeError(f"{stage}: empty sparse model")
 
-    logger.info(f"{stage}: SUCCESS — sparse model created")
+    logger.info(f"{stage}: SUCCESS — sparse model ready")

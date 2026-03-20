@@ -1,90 +1,143 @@
-from pathlib import Path
-import cv2
-import numpy as np
+from copy import deepcopy
 
 
-def compute_entropy(gray_img):
-    """
-    Compute Shannon entropy of grayscale image.
-    """
-    hist = cv2.calcHist([gray_img], [0], None, [256], [0, 256])
-    hist = hist.ravel() / hist.sum()
-
-    hist = hist[hist > 0]  # remove zeros
-
-    return -np.sum(hist * np.log2(hist))
-
-
-def run(paths, config, logger):
-    stage = "dataset_analyzer"
+def run(config, stats, logger):
+    stage = "parameter_optimizer"
     logger.info(f"---- {stage.upper()} ----")
 
-    # -----------------------------
-    # Select image directory
-    # -----------------------------
-    downsample_enabled = config.get("downsampling", {}).get("enabled", True)
-    image_dir = paths.images_downsampled if downsample_enabled else paths.images
+    cfg = deepcopy(config)
 
-    if not image_dir.exists():
-        raise RuntimeError(f"{stage}: image directory not found")
+    ds = stats.get("dataset", {})
+    fs = stats.get("features", {})
+    ms = stats.get("matches", {})
 
-    image_files = list(image_dir.glob("*"))
+    num_images = ds.get("num_images", 0)
+    total_pixels = ds.get("total_pixels", 0)
+    size = ds.get("size_class", "medium")
 
-    if len(image_files) == 0:
-        raise RuntimeError(f"{stage}: no images found")
+    connectivity = ms.get("connectivity", 0)
 
-    logger.info(f"{stage}: analyzing {len(image_files)} images")
+    logger.info(f"{stage}: dataset size = {size}")
+    logger.info(f"{stage}: total_pixels = {total_pixels}")
 
-    # -----------------------------
-    # Stats containers
-    # -----------------------------
-    widths = []
-    heights = []
-    entropies = []
+    updates = {}
 
-    # -----------------------------
-    # Process images
-    # -----------------------------
-    for img_path in image_files:
-        try:
-            img = cv2.imread(str(img_path))
+    # =====================================================
+    # 🔥 BACKEND SELECTION (STABLE RULE)
+    # =====================================================
+    if num_images > 120 and connectivity > 0.4:
+        backend = "glomap"
+        logger.info(f"{stage}: using GLOMAP")
+    else:
+        backend = "colmap"
+        logger.info(f"{stage}: using COLMAP")
 
-            if img is None:
-                logger.warning(f"{stage}: failed to read {img_path.name}")
-                continue
+    updates["sparse"] = {"backend": backend}
 
-            h, w = img.shape[:2]
-            widths.append(w)
-            heights.append(h)
+    # =====================================================
+    # 🔥 DOWNSAMPLING DECISION (HARDWARE-BASED)
+    # =====================================================
+    downsample = False
 
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            ent = compute_entropy(gray)
-            entropies.append(ent)
+    if size == "large" or total_pixels > 1.5e9:
+        downsample = True
 
-        except Exception as e:
-            logger.warning(f"{stage}: error processing {img_path.name}: {e}")
-
-    # -----------------------------
-    # Aggregate stats
-    # -----------------------------
-    stats = {
-        "num_images": len(widths),
-        "avg_width": float(np.mean(widths)),
-        "avg_height": float(np.mean(heights)),
-        "max_dim": int(max(max(widths), max(heights))),
-        "avg_entropy": float(np.mean(entropies)),
-        "min_entropy": float(np.min(entropies)),
-        "max_entropy": float(np.max(entropies)),
+    updates["downsampling"] = {
+        "enabled": downsample,
+        "target_max_dim": 1600 if downsample else 2400
     }
 
-    # -----------------------------
-    # Derived metrics
-    # -----------------------------
-    stats["aspect_variation"] = float(np.std(
-        [w / h for w, h in zip(widths, heights)]
-    ))
+    # =====================================================
+    # 🔷 PROFILE SELECTION
+    # =====================================================
 
-    logger.info(f"{stage}: stats computed")
-    logger.info(f"{stage}: {stats}")
+    # -----------------------------
+    # SMALL DATASET → MAX QUALITY
+    # -----------------------------
+    if size == "small":
 
-    return stats
+        updates["sift"] = {
+            "max_num_features": 18000,
+            "peak_threshold": 0.004
+        }
+
+        updates["matching"] = {
+            "type": "exhaustive"
+        }
+
+        updates["dense"] = {
+            "window_radius": 9,
+            "num_samples": 30,
+            "num_iterations": 7,
+            "filter_min_num_consistent": 2
+        }
+
+        updates["fusion"] = {
+            "min_num_pixels": 2
+        }
+
+        updates["mesh"] = {
+            "poisson_depth": 12
+        }
+
+    # -----------------------------
+    # MEDIUM DATASET → BALANCED
+    # -----------------------------
+    elif size == "medium":
+
+        updates["sift"] = {
+            "max_num_features": 12000,
+            "peak_threshold": 0.005
+        }
+
+        updates["matching"] = {
+            "type": "sequential"
+        }
+
+        updates["dense"] = {
+            "window_radius": 7,
+            "num_samples": 20,
+            "num_iterations": 5,
+            "filter_min_num_consistent": 3
+        }
+
+        updates["fusion"] = {
+            "min_num_pixels": 3
+        }
+
+        updates["mesh"] = {
+            "poisson_depth": 11
+        }
+
+    # -----------------------------
+    # LARGE DATASET → SAFE MODE
+    # -----------------------------
+    else:
+
+        updates["sift"] = {
+            "max_num_features": 8000,
+            "peak_threshold": 0.006
+        }
+
+        updates["matching"] = {
+            "type": "vocab_tree"
+        }
+
+        updates["dense"] = {
+            "window_radius": 5,
+            "num_samples": 15,
+            "num_iterations": 4,
+            "filter_min_num_consistent": 3
+        }
+
+        updates["fusion"] = {
+            "min_num_pixels": 5
+        }
+
+        updates["mesh"] = {
+            "poisson_depth": 10
+        }
+
+    logger.info(f"{stage}: profile applied ({size})")
+
+    return updates

@@ -2,7 +2,7 @@ from pathlib import Path
 import shutil
 
 
-VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"}
+VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
 
 def run(paths, config, logger):
@@ -12,44 +12,60 @@ def run(paths, config, logger):
     raw_dir = paths.raw_images
     working_dir = paths.images
 
+    # 🔥 SUPPORT EXTERNAL IMAGE SOURCE
+    external_path = config.get("ingestion", {}).get("external_image_path")
+
+    if external_path:
+        raw_dir = Path(external_path)
+        logger.info(f"{stage}: using external image path → {raw_dir}")
+
     if not raw_dir.exists():
-        raise RuntimeError(f"{stage}: raw_images folder not found at {raw_dir}")
+        raise RuntimeError(f"{stage}: raw_images folder not found")
+
+    # 🔥 CLEAN working directory (CRITICAL)
+    if working_dir.exists():
+        shutil.rmtree(working_dir)
 
     working_dir.mkdir(parents=True, exist_ok=True)
 
-    copy_mode = config.get("ingestion", {}).get("copy_mode", "copy")
-
-    images = [p for p in raw_dir.iterdir() if p.suffix in VALID_EXTENSIONS]
+    # 🔥 Normalize extensions
+    images = sorted([
+        p for p in raw_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in VALID_EXTENSIONS
+    ])
 
     if not images:
-        raise RuntimeError(f"{stage}: No valid images found in {raw_dir}")
+        raise RuntimeError(f"{stage}: no valid images found")
 
-    logger.info(f"{stage}: Found {len(images)} images")
+    logger.info(f"{stage}: found {len(images)} images")
+
+    copy_mode = config.get("ingestion", {}).get("copy_mode", "copy")
 
     copied = 0
-    skipped = 0
 
     for img_path in images:
         target_path = working_dir / img_path.name
 
-        if target_path.exists():
-            skipped += 1
-            continue
-
-        if copy_mode == "copy":
-            shutil.copy2(img_path, target_path)
-
-        elif copy_mode == "symlink":
-            try:
-                target_path.symlink_to(img_path.resolve())
-            except Exception:
-                logger.warning(f"{stage}: symlink failed, falling back to copy")
+        try:
+            if copy_mode == "copy":
                 shutil.copy2(img_path, target_path)
 
-        else:
-            raise ValueError(f"{stage}: Unknown copy_mode: {copy_mode}")
+            elif copy_mode == "symlink":
+                try:
+                    target_path.symlink_to(img_path.resolve())
+                except Exception:
+                    shutil.copy2(img_path, target_path)
 
-        copied += 1
+            else:
+                raise ValueError(f"{stage}: unknown copy_mode")
 
-    logger.info(f"{stage}: copied={copied}, skipped={skipped}")
+            copied += 1
+
+        except Exception as e:
+            logger.warning(f"{stage}: failed {img_path.name} → {e}")
+
+    if copied == 0:
+        raise RuntimeError(f"{stage}: no images copied")
+
+    logger.info(f"{stage}: copied={copied}")
     logger.info(f"{stage}: DONE")

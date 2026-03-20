@@ -14,70 +14,115 @@ def run(paths, config, logger):
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
 
-    # -----------------------------
-    # Get number of images
-    # -----------------------------
-    cursor.execute("SELECT COUNT(*) FROM images")
-    num_images = cursor.fetchone()[0]
+    try:
+        # -----------------------------
+        # IMAGE COUNT
+        # -----------------------------
+        cursor.execute("SELECT COUNT(*) FROM images")
+        num_images = cursor.fetchone()[0]
 
-    if num_images == 0:
-        raise RuntimeError(f"{stage}: no images found in database")
+        if num_images == 0:
+            raise RuntimeError(f"{stage}: no images in database")
 
-    # -----------------------------
-    # Get matches (image pairs)
-    # -----------------------------
-    cursor.execute("SELECT pair_id FROM matches")
-    pair_ids = [row[0] for row in cursor.fetchall()]
+        # -----------------------------
+        # MATCH DATA
+        # -----------------------------
+        cursor.execute("SELECT pair_id, rows FROM matches")
+        rows = cursor.fetchall()
 
-    num_matches = len(pair_ids)
+        if not rows:
+            logger.warning(f"{stage}: no matches found")
 
-    # -----------------------------
-    # Decode pair_id → (i, j)
-    # -----------------------------
-    def pair_id_to_image_ids(pair_id):
-        image_id2 = pair_id % 2147483647
-        image_id1 = (pair_id - image_id2) // 2147483647
-        return int(image_id1), int(image_id2)
+            return {
+                "num_images": num_images,
+                "num_matches": 0,
+                "avg_matches_per_pair": 0.0,
+                "connectivity": 0.0,
+                "avg_degree": 0.0,
+                "min_degree": 0,
+                "max_degree": 0,
+                "weak_nodes": num_images,
+            }
 
-    # -----------------------------
-    # Build graph
-    # -----------------------------
-    degrees = [0] * (num_images + 1)  # 1-indexed
+        # -----------------------------
+        # DECODE GRAPH
+        # -----------------------------
+        MAX_ID = 2147483647
 
-    for pid in pair_ids:
-        i, j = pair_id_to_image_ids(pid)
-        degrees[i] += 1
-        degrees[j] += 1
+        def decode_pair(pair_id):
+            j = pair_id % MAX_ID
+            i = (pair_id - j) // MAX_ID
+            return int(i), int(j)
 
-    degrees = degrees[1:]  # remove index 0
+        degrees = {}
 
-    avg_degree = np.mean(degrees) if degrees else 0
-    min_degree = np.min(degrees) if degrees else 0
-    max_degree = np.max(degrees) if degrees else 0
+        valid_pairs = 0
+        match_sizes = []
 
-    # -----------------------------
-    # Connectivity
-    # -----------------------------
-    max_edges = num_images * (num_images - 1) / 2
-    connectivity = num_matches / max_edges if max_edges > 0 else 0
+        for pair_id, rows_count in rows:
+            i, j = decode_pair(pair_id)
 
-    # -----------------------------
-    # Weak node detection
-    # -----------------------------
-    weak_nodes = sum(1 for d in degrees if d < 2)
+            # Skip invalid IDs
+            if i <= 0 or j <= 0:
+                continue
 
-    stats = {
-        "num_images": num_images,
-        "num_matches": num_matches,
-        "connectivity": float(connectivity),
-        "avg_degree": float(avg_degree),
-        "min_degree": int(min_degree),
-        "max_degree": int(max_degree),
-        "weak_nodes": int(weak_nodes),
-    }
+            degrees[i] = degrees.get(i, 0) + 1
+            degrees[j] = degrees.get(j, 0) + 1
 
-    logger.info(f"{stage}: stats computed")
-    logger.info(f"{stage}: {stats}")
+            valid_pairs += 1
+            match_sizes.append(rows_count)
 
-    conn.close()
-    return stats
+        if valid_pairs == 0:
+            logger.warning(f"{stage}: no valid match pairs")
+
+            return {
+                "num_images": num_images,
+                "num_matches": 0,
+                "avg_matches_per_pair": 0.0,
+                "connectivity": 0.0,
+                "avg_degree": 0.0,
+                "min_degree": 0,
+                "max_degree": 0,
+                "weak_nodes": num_images,
+            }
+
+        # -----------------------------
+        # DEGREE VECTOR
+        # -----------------------------
+        degree_values = np.array(list(degrees.values()))
+
+        avg_degree = float(np.mean(degree_values))
+        min_degree = int(np.min(degree_values))
+        max_degree = int(np.max(degree_values))
+
+        weak_nodes = int(sum(1 for d in degree_values if d < 2))
+
+        # -----------------------------
+        # CONNECTIVITY
+        # -----------------------------
+        max_edges = num_images * (num_images - 1) / 2
+        connectivity = valid_pairs / max_edges if max_edges > 0 else 0.0
+
+        # -----------------------------
+        # MATCH QUALITY
+        # -----------------------------
+        avg_matches_per_pair = float(np.mean(match_sizes)) if match_sizes else 0.0
+
+        stats = {
+            "num_images": num_images,
+            "num_matches": valid_pairs,
+            "avg_matches_per_pair": avg_matches_per_pair,
+            "connectivity": float(connectivity),
+            "avg_degree": avg_degree,
+            "min_degree": min_degree,
+            "max_degree": max_degree,
+            "weak_nodes": weak_nodes,
+        }
+
+        logger.info(f"{stage}: SUCCESS")
+        logger.info(f"{stage}: {stats}")
+
+        return stats
+
+    finally:
+        conn.close()
