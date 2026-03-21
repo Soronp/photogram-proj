@@ -31,7 +31,7 @@ def run(paths, config, logger):
     if not input_dir.exists():
         raise RuntimeError(f"{stage}: images not found")
 
-    max_dim = config.get("downsampling", {}).get("target_max_dim", 2000)
+    max_dim = config.get("downsampling", {}).get("target_max_dim", 2400)
 
     images = sorted([
         p for p in input_dir.iterdir()

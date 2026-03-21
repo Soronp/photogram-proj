@@ -13,51 +13,67 @@ def run(paths, config, logger):
     if not input_ply.exists():
         raise RuntimeError(f"{stage}: fused.ply not found")
 
+    # 🔥 ALWAYS REBUILD (no skipping in adaptive system)
     if output_mesh.exists():
-        logger.warning(f"{stage}: mesh already exists, skipping...")
-        return
+        logger.warning(f"{stage}: removing previous mesh")
+        output_mesh.unlink()
 
-    # -----------------------------
-    # Load point cloud
-    # -----------------------------
+    # =====================================================
+    # LOAD POINT CLOUD
+    # =====================================================
     logger.info(f"{stage}: loading point cloud...")
     pcd = o3d.io.read_point_cloud(str(input_ply))
 
-    if len(pcd.points) < 100:
+    num_points = len(pcd.points)
+
+    if num_points < 100:
         raise RuntimeError(f"{stage}: point cloud too small")
 
-    # -----------------------------
-    # Downsample (important for stability)
-    # -----------------------------
-    voxel_size = config.get("mesh", {}).get("voxel_size", 0.005)
-    logger.info(f"{stage}: voxel downsampling ({voxel_size})")
+    logger.info(f"{stage}: input points = {num_points}")
+
+    # =====================================================
+    # 🔥 ADAPTIVE VOXEL SIZE (CRITICAL FIX)
+    # =====================================================
+    if num_points > 800000:
+        voxel_size = 0.003
+    elif num_points > 400000:
+        voxel_size = 0.004
+    else:
+        voxel_size = 0.005
+
+    logger.info(f"{stage}: voxel downsampling = {voxel_size}")
     pcd = pcd.voxel_down_sample(voxel_size)
 
-    # -----------------------------
-    # Outlier removal (less aggressive)
-    # -----------------------------
+    # =====================================================
+    # OUTLIER REMOVAL (LESS AGGRESSIVE)
+    # =====================================================
     logger.info(f"{stage}: removing outliers...")
     pcd, _ = pcd.remove_statistical_outlier(
-        nb_neighbors=30,
-        std_ratio=2.5
+        nb_neighbors=20,
+        std_ratio=3.0
     )
 
-    # -----------------------------
-    # Normal estimation (CRITICAL)
-    # -----------------------------
+    # =====================================================
+    # NORMAL ESTIMATION
+    # =====================================================
     logger.info(f"{stage}: estimating normals...")
     pcd.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(
-            radius=voxel_size * 5,
-            max_nn=50
+            radius=voxel_size * 6,
+            max_nn=60
         )
     )
     pcd.orient_normals_consistent_tangent_plane(100)
 
-    # -----------------------------
-    # Poisson Reconstruction (HIGH QUALITY)
-    # -----------------------------
-    depth = config.get("mesh", {}).get("poisson_depth", 11)
+    # =====================================================
+    # 🔥 ADAPTIVE POISSON DEPTH (KEY UPGRADE)
+    # =====================================================
+    if num_points > 800000:
+        depth = 12
+    elif num_points > 400000:
+        depth = 11
+    else:
+        depth = 10
 
     logger.info(f"{stage}: poisson reconstruction (depth={depth})")
 
@@ -68,33 +84,37 @@ def run(paths, config, logger):
         linear_fit=False
     )
 
-    # -----------------------------
-    # Density-based cleanup (LESS aggressive)
-    # -----------------------------
+    # =====================================================
+    # 🔥 MINIMAL DENSITY FILTERING
+    # =====================================================
     densities = np.asarray(densities)
-    threshold = np.quantile(densities, 0.01)  # 🔥 reduced filtering
+
+    if num_points > 500000:
+        threshold = np.quantile(densities, 0.005)  # preserve detail
+    else:
+        threshold = np.quantile(densities, 0.01)
+
     mesh.remove_vertices_by_mask(densities < threshold)
 
-    # -----------------------------
-    # Keep largest connected component
-    # -----------------------------
+    # =====================================================
+    # KEEP LARGEST COMPONENT
+    # =====================================================
     logger.info(f"{stage}: removing small components...")
     labels = np.array(mesh.cluster_connected_triangles()[0])
     largest_cluster = np.argmax(np.bincount(labels))
-    triangles_to_keep = labels == largest_cluster
-    mesh.remove_triangles_by_mask(~triangles_to_keep)
+    mesh.remove_triangles_by_mask(labels != largest_cluster)
 
-    # -----------------------------
-    # Final cleanup
-    # -----------------------------
+    # =====================================================
+    # FINAL CLEANUP
+    # =====================================================
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_triangles()
     mesh.remove_non_manifold_edges()
     mesh.compute_vertex_normals()
 
-    # -----------------------------
-    # Save
-    # -----------------------------
+    # =====================================================
+    # SAVE
+    # =====================================================
     o3d.io.write_triangle_mesh(str(output_mesh), mesh)
 
-    logger.info(f"{stage}: mesh saved at {output_mesh}")
+    logger.info(f"{stage}: SUCCESS → {output_mesh}")
