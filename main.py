@@ -4,10 +4,6 @@ import shutil
 from core.runner import PipelineRunner
 from config.config_manager import load_config
 
-
-# =====================================================
-# IMAGE VALIDATION
-# =====================================================
 VALID_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
 
@@ -16,13 +12,12 @@ def is_valid_image(file: Path):
 
 
 # =====================================================
-# USER INPUT
+# INPUT
 # =====================================================
 def get_user_paths():
     print("=== Photogrammetry Pipeline Setup ===")
 
     input_path = Path(input("Enter path to IMAGE folder: ").strip())
-
     if not input_path.exists():
         raise FileNotFoundError(f"Input path does not exist: {input_path}")
 
@@ -33,98 +28,50 @@ def get_user_paths():
     copy_enabled = (copy_choice != "n")
 
     if not copy_enabled:
-        print("Using images in-place (advanced mode)")
         return project_root, input_path
 
     if raw_images_dir.exists():
-        print("Cleaning existing raw_images...")
         shutil.rmtree(raw_images_dir)
 
     raw_images_dir.mkdir(parents=True, exist_ok=True)
 
     print("\nCopying images...")
-
-    copied, skipped = 0, 0
-
     for img in input_path.iterdir():
-        if not is_valid_image(img):
-            skipped += 1
-            continue
-
-        try:
+        if is_valid_image(img):
             shutil.copy2(img, raw_images_dir / img.name)
-            copied += 1
-        except Exception:
-            skipped += 1
-
-    print(f"\nCopied: {copied}, skipped: {skipped}")
-
-    if copied == 0:
-        raise RuntimeError("No valid images found")
 
     return project_root, raw_images_dir
 
 
 # =====================================================
-# PIPELINE SELECTION
+# PIPELINE CHOICE
 # =====================================================
 def get_pipeline_choice():
     print("\n=== Pipeline Selection ===")
-    print("A → COLMAP (baseline)")
-    print("B → GLOMAP (sparse) + COLMAP (dense)")
+    print("A → COLMAP full")
+    print("B → GLOMAP + COLMAP dense")
+    print("C → COLMAP + OpenMVS (full MVS pipeline)")
 
     choice = input("Select pipeline [A]: ").strip().upper()
-
-    if choice not in ["A", "B"]:
-        choice = "A"
-
-    return choice
+    return choice if choice in ["A", "B", "C"] else "A"
 
 
 # =====================================================
-# CONFIG BUILDER
+# CONFIG
 # =====================================================
-def get_user_config(project_root: Path, image_source: Path):
+def get_user_config(project_root: Path, image_source: Path, pipeline_choice: str):
 
-    print("\n=== Pipeline Configuration ===")
-
-    retry_enabled = input("Enable adaptive retries? (y/n) [y]: ").strip().lower() != "n"
-
-    max_retries = 2
-    if retry_enabled:
-        val = input("Max retries [2]: ").strip()
-        if val:
-            max_retries = int(val)
+    backend_map = {
+        "A": "colmap",
+        "B": "glomap",
+        "C": "colmap"
+    }
 
     user_config = {
-        "paths": {
-            "project_root": str(project_root)
-        },
-
-        "ingestion": {
-            "external_image_path": str(image_source)
-        },
-
-        "downsampling": {
-            "enabled": True
-        },
-
-        # 🔥 IMPORTANT: REMOVE AUTO BACKEND
-        # pipeline decides backend now
-        "sparse": {
-            "backend": "colmap"  # default fallback
-        },
-
-        "retry": {
-            "enabled": retry_enabled,
-            "max_retries": max_retries
-        },
-
-        "system": {
-            "ram_gb": 16,
-            "gpu": True,
-            "cpu_threads": -1
-        }
+        "paths": {"project_root": str(project_root)},
+        "ingestion": {"external_image_path": str(image_source)},
+        "downsampling": {"enabled": True},
+        "sparse": {"backend": backend_map[pipeline_choice]},
     }
 
     return user_config
@@ -134,16 +81,17 @@ def get_user_config(project_root: Path, image_source: Path):
 # MAIN
 # =====================================================
 if __name__ == "__main__":
+    try:
+        project_root, image_source = get_user_paths()
+        pipeline_choice = get_pipeline_choice()
 
-    project_root, image_source = get_user_paths()
+        user_config = get_user_config(project_root, image_source, pipeline_choice)
+        config = load_config(user_config)
 
-    pipeline_choice = get_pipeline_choice()
+        runner = PipelineRunner(config, pipeline_type=pipeline_choice)
+        runner.run()
 
-    user_config = get_user_config(project_root, image_source)
+        print("\n✅ Pipeline completed successfully!")
 
-    config = load_config(user_config)
-
-    # 🔥 PASS PIPELINE TYPE
-    runner = PipelineRunner(config, pipeline_type=pipeline_choice)
-
-    runner.run()
+    except Exception as e:
+        print(f"\n❌ Pipeline failed: {e}")

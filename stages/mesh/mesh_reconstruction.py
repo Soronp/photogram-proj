@@ -24,90 +24,99 @@ def run(paths, config, logger):
     pcd = o3d.io.read_point_cloud(str(input_ply))
     num_points = len(pcd.points)
 
-    if num_points < 1000:
+    if num_points < 5000:
         raise RuntimeError(f"{stage}: insufficient points")
 
     logger.info(f"{stage}: input points = {num_points}")
 
     # =====================================================
-    # 🎯 TARGET POINT BUDGET (CRITICAL)
+    # 🔥 MINIMAL DOWNSAMPLING (PRESERVE DETAIL)
     # =====================================================
-    TARGET_POINTS = 1_000_000
-
     if num_points > 1_500_000:
-        ratio = TARGET_POINTS / num_points
-        voxel_size = 0.002 + (0.004 * (1 - ratio))
-        logger.info(f"{stage}: downsampling to control density → voxel={voxel_size:.5f}")
+        voxel_size = 0.0025
+        logger.info(f"{stage}: controlled downsample → voxel={voxel_size}")
         pcd = pcd.voxel_down_sample(voxel_size)
     else:
-        voxel_size = 0.003
-        logger.info(f"{stage}: light voxel downsampling → {voxel_size}")
-        pcd = pcd.voxel_down_sample(voxel_size)
+        logger.info(f"{stage}: no downsampling (preserving detail)")
 
-    logger.info(f"{stage}: after voxel = {len(pcd.points)} points")
+    logger.info(f"{stage}: after voxel = {len(pcd.points)}")
 
     # =====================================================
-    # 🔥 ROBUST OUTLIER REMOVAL (NOT TOO AGGRESSIVE)
+    # 🔥 LIGHT DENOISING (SAFE)
     # =====================================================
     pcd, _ = pcd.remove_statistical_outlier(
-        nb_neighbors=20,
-        std_ratio=2.5
+        nb_neighbors=16,
+        std_ratio=3.0   # 🔥 more permissive
     )
 
-    logger.info(f"{stage}: after denoise = {len(pcd.points)} points")
+    logger.info(f"{stage}: after denoise = {len(pcd.points)}")
 
     # =====================================================
-    # NORMAL ESTIMATION (STABLE)
+    # NORMAL ESTIMATION (CRITICAL FOR POISSON)
     # =====================================================
     logger.info(f"{stage}: estimating normals...")
 
+    bbox = pcd.get_axis_aligned_bounding_box()
+    scale = np.linalg.norm(bbox.get_extent())
+
+    radius = scale * 0.01  # adaptive radius
+
     pcd.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(
-            radius=voxel_size * 5,
-            max_nn=50
+            radius=radius,
+            max_nn=60
         )
     )
 
     pcd.orient_normals_consistent_tangent_plane(50)
 
     # =====================================================
-    # 🎯 POISSON DEPTH CONTROL (KEY FIX)
+    # 🔥 POISSON RECONSTRUCTION (HIGH QUALITY)
     # =====================================================
     pts = len(pcd.points)
 
-    if pts > 1_200_000:
+    if pts > 1_000_000:
+        depth = 12
+    elif pts > 400_000:
         depth = 11
-    elif pts > 700_000:
-        depth = 10
     else:
-        depth = 9
+        depth = 10
 
     logger.info(f"{stage}: poisson depth = {depth}")
 
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
         pcd,
         depth=depth,
-        scale=1.05,
-        linear_fit=True
+        scale=1.1,        # 🔥 slightly expanded → fills holes
+        linear_fit=False  # 🔥 sharper detail
     )
 
     # =====================================================
-    # 🔥 DENSITY FILTERING (BALANCED)
+    # 🔥 VERY LIGHT DENSITY FILTERING (ANTI-HOLE)
     # =====================================================
     densities = np.asarray(densities)
 
-    # Keep ~99% for high detail
-    threshold = np.quantile(densities, 0.01)
+    # 🔥 keep 99.8% → almost everything
+    threshold = np.quantile(densities, 0.002)
+
+    logger.info(f"{stage}: density threshold = {threshold:.6f}")
 
     mesh.remove_vertices_by_mask(densities < threshold)
 
     # =====================================================
-    # KEEP LARGEST COMPONENT ONLY
+    # 🔥 OPTIONAL: KEEP MULTIPLE COMPONENTS (IMPORTANT)
     # =====================================================
-    labels = np.array(mesh.cluster_connected_triangles()[0])
-    largest_cluster = np.argmax(np.bincount(labels))
+    triangle_clusters, cluster_n_triangles, _ = mesh.cluster_connected_triangles()
 
-    mesh.remove_triangles_by_mask(labels != largest_cluster)
+    cluster_n_triangles = np.array(cluster_n_triangles)
+
+    # 🔥 keep clusters ≥5% of largest
+    largest = cluster_n_triangles.max()
+    keep = cluster_n_triangles > (0.05 * largest)
+
+    remove_mask = [not keep[c] for c in triangle_clusters]
+
+    mesh.remove_triangles_by_mask(remove_mask)
 
     # =====================================================
     # CLEANUP
