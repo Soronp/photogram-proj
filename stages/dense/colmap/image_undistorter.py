@@ -14,9 +14,6 @@ def run(paths, config, logger, tool_runner):
     stage = "image_undistorter"
     logger.info(f"---- {stage.upper()} ----")
 
-    # -----------------------------
-    # Resolve sparse model
-    # -----------------------------
     sparse_root = paths.sparse
 
     if not sparse_root.exists():
@@ -25,27 +22,62 @@ def run(paths, config, logger, tool_runner):
     sparse_model = _find_sparse_model(sparse_root)
     logger.info(f"{stage}: using sparse model → {sparse_model.name}")
 
-    # 🔥 ALWAYS use canonical image dir
     image_dir = paths.images
-
     if not image_dir.exists():
         raise RuntimeError(f"{stage}: image directory missing")
 
-    # -----------------------------
-    # Output
-    # -----------------------------
     dense_dir = paths.dense
     dense_dir.mkdir(parents=True, exist_ok=True)
 
-    if (dense_dir / "images").exists():
-        logger.warning(f"{stage}: already done, skipping")
-        return
+    # =====================================================
+    # 🔥 ANALYSIS INPUT
+    # =====================================================
+    analysis = config.get("analysis_results", {})
+    dataset = analysis.get("dataset", {})
 
-    # -----------------------------
-    # Config (SAFE DEFAULT)
-    # -----------------------------
-    max_image_size = config.get("dense", {}).get("max_image_size", 1600)
+    num_images = dataset.get("num_images", 0)
+    avg_resolution = dataset.get("avg_resolution", 2000)
+    retry = config.get("_meta", {}).get("retry_count", 0)
 
+    # =====================================================
+    # 🔥 ADAPTIVE MAX IMAGE SIZE (CRITICAL FOR DENSITY)
+    # =====================================================
+    if retry == 0:
+        if avg_resolution >= 3000:
+            max_image_size = 3000
+        elif avg_resolution >= 2000:
+            max_image_size = 2600
+        else:
+            max_image_size = 2200
+        logger.info(f"{stage}: HIGH-RES mode")
+
+    elif retry == 1:
+        max_image_size = 3000
+        logger.info(f"{stage}: BOOST mode")
+
+    else:
+        max_image_size = 3200
+        logger.info(f"{stage}: MAX QUALITY mode")
+
+    # Hard cap
+    max_image_size = min(max_image_size, 3200)
+
+    logger.info(f"{stage}: max_image_size={max_image_size}")
+
+    # =====================================================
+    # 🔥 FORCE REBUILD (IMPORTANT FOR REFINEMENT LOOP)
+    # =====================================================
+    dense_images_dir = dense_dir / "images"
+
+    if dense_images_dir.exists():
+        logger.warning(f"{stage}: removing previous undistorted images")
+        for f in dense_images_dir.glob("*"):
+            f.unlink()
+        dense_images_dir.rmdir()
+
+    # =====================================================
+    # 🔥 BUILD COMMAND
+    # =====================================================
     cmd = [
         "colmap",
         "image_undistorter",
@@ -53,9 +85,33 @@ def run(paths, config, logger, tool_runner):
         "--input_path", str(sparse_model),
         "--output_path", str(dense_dir),
         "--output_type", "COLMAP",
+
+        # 🔥 CORE DENSITY CONTROL
         "--max_image_size", str(max_image_size),
     ]
 
+    # =====================================================
+    # 🔥 EXECUTION
+    # =====================================================
     tool_runner.run(cmd, stage=stage)
 
-    logger.info(f"{stage}: DONE")
+    # =====================================================
+    # 🔥 VALIDATION
+    # =====================================================
+    if not dense_images_dir.exists():
+        raise RuntimeError(f"{stage}: undistortion failed (no images)")
+
+    num_out = len(list(dense_images_dir.glob("*")))
+    num_in = len(list(image_dir.glob("*")))
+
+    coverage = num_out / max(num_in, 1)
+
+    logger.info(f"{stage}: output images = {num_out}")
+    logger.info(f"{stage}: coverage = {coverage:.2f}")
+
+    if coverage < 0.7:
+        logger.warning(f"{stage}: LOW undistortion coverage")
+    else:
+        logger.info(f"{stage}: GOOD undistortion coverage")
+
+    logger.info(f"{stage}: SUCCESS")
