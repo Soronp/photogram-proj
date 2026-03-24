@@ -1,5 +1,9 @@
 from copy import deepcopy
 
+# =====================================================
+# DEFAULT CONFIG
+# =====================================================
+
 DEFAULT_CONFIG = {
 
     # =====================================================
@@ -8,13 +12,16 @@ DEFAULT_CONFIG = {
     "pipeline": {
         "name": "adaptive_multibackend_sfm",
 
-        # 🔥 MASTER SWITCHES
-        "mode": "mesh",  # mesh | gaussian
+        # master mode
+        "mode": "mesh",
 
-        "sparse_backend": "colmap",   # colmap | glomap | openmvg
-        "dense_backend": "colmap",    # colmap | openmvs | none
-        "mesh_backend": "colmap",     # colmap | openmvs | hybrid | none
-        "texture_backend": "colmap",  # colmap | openmvs | none
+        "sparse_backend": "colmap",
+        "dense_backend": "colmap",
+        "mesh_backend": "colmap",
+        "texture_backend": "colmap",
+
+        # camera model policy
+        "camera_model": "auto"   # auto | pinhole | opencv
     },
 
     # =====================================================
@@ -40,7 +47,7 @@ DEFAULT_CONFIG = {
     },
 
     # =====================================================
-    # FEATURE EXTRACTION (SHARED)
+    # FEATURE EXTRACTION
     # =====================================================
     "sift": {
         "max_num_features": 16000,
@@ -51,7 +58,7 @@ DEFAULT_CONFIG = {
     },
 
     # =====================================================
-    # MATCHING (SHARED)
+    # MATCHING
     # =====================================================
     "matching": {
         "type": "exhaustive",
@@ -62,14 +69,9 @@ DEFAULT_CONFIG = {
     # SPARSE BACKENDS
     # =====================================================
     "sparse": {
-
-        # 🔥 GLOBAL CONTROL
         "backend": "colmap",
         "fallback_to_colmap": True,
 
-        # -----------------------------
-        # COLMAP PARAMETERS
-        # -----------------------------
         "colmap": {
             "init_min_inliers": 40,
             "abs_min_inliers": 30,
@@ -79,18 +81,12 @@ DEFAULT_CONFIG = {
             "use_gpu": True
         },
 
-        # -----------------------------
-        # GLOMAP PARAMETERS
-        # -----------------------------
         "glomap": {
             "num_threads": -1,
             "use_rotation_averaging": True,
-            "robust_loss": "Cauchy",  # placeholder for future CLI flags
+            "robust_loss": "Cauchy",
         },
 
-        # -----------------------------
-        # OPENMVG (FUTURE)
-        # -----------------------------
         "openmvg": {
             "feature_type": "SIFT",
             "matching_strategy": "FASTCASCADEHASHINGL2",
@@ -101,12 +97,8 @@ DEFAULT_CONFIG = {
     # DENSE BACKENDS
     # =====================================================
     "dense": {
-
         "backend": "colmap",
 
-        # -----------------------------
-        # COLMAP DENSE
-        # -----------------------------
         "colmap": {
             "window_radius": 7,
             "num_samples": 25,
@@ -114,9 +106,6 @@ DEFAULT_CONFIG = {
             "use_gpu": True
         },
 
-        # -----------------------------
-        # OPENMVS DENSE
-        # -----------------------------
         "openmvs": {
             "resolution_level": 1,
             "number_views": 6,
@@ -125,7 +114,7 @@ DEFAULT_CONFIG = {
     },
 
     # =====================================================
-    # FUSION (COLMAP)
+    # FUSION
     # =====================================================
     "fusion": {
         "min_num_pixels": 2
@@ -135,7 +124,6 @@ DEFAULT_CONFIG = {
     # MESH BACKENDS
     # =====================================================
     "mesh": {
-
         "backend": "colmap",
 
         "colmap": {},
@@ -181,7 +169,7 @@ DEFAULT_CONFIG = {
     "analysis_results": {},
 
     # =====================================================
-    # LIMITS (ADAPTIVE SYSTEM)
+    # LIMITS
     # =====================================================
     "limits": {
         "sift_max_features": [8000, 20000],
@@ -200,17 +188,52 @@ DEFAULT_CONFIG = {
 }
 
 
+# =====================================================
+# LOAD CONFIG
+# =====================================================
+
 def load_config(user_config=None):
     config = deepcopy(DEFAULT_CONFIG)
+
     if user_config:
         _deep_update(config, user_config)
+
+    # =====================================================
+    # 🔥 PIPELINE-AWARE CAMERA MODEL LOGIC
+    # =====================================================
+
+    pipeline = config["pipeline"]
+
+    # default: best COLMAP accuracy
+    camera_model = "OPENCV"
+
+    # Pipeline C → OpenMVS compatibility mode
+    if pipeline["mesh_backend"] in ["openmvs", "hybrid"] or pipeline["dense_backend"] == "openmvs":
+        camera_model = "PINHOLE"
+
+    # explicit override
+    if pipeline.get("camera_model") == "pinhole":
+        camera_model = "PINHOLE"
+    elif pipeline.get("camera_model") == "opencv":
+        camera_model = "OPENCV"
+
+    config["pipeline"]["camera_model"] = camera_model
+
     return config
 
+
+# =====================================================
+# ANALYSIS INJECTION
+# =====================================================
 
 def inject_analysis(config, stats):
     config["analysis_results"] = stats
     return config
 
+
+# =====================================================
+# DEEP UPDATE
+# =====================================================
 
 def _deep_update(base, updates):
     for k, v in updates.items():

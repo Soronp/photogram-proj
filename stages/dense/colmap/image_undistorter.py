@@ -110,7 +110,7 @@ def run(paths, config, logger, tool_runner):
         "--output_path", str(dense_dir),
         "--output_type", "COLMAP",
 
-        # 🔥 CRITICAL: drives ALL downstream density
+        # CRITICAL: drives ALL downstream density
         "--max_image_size", str(max_image_size),
     ]
 

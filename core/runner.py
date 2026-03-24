@@ -19,13 +19,13 @@ from stages.dense.colmap.image_undistorter import run as undistort
 from stages.dense.colmap.patch_match_stereo import run as patch_match
 from stages.dense.colmap.stereo_fusion import run as stereo_fusion
 
-# OPENMVS DENSE
+# OPENMVS
 from stages.openmvs.export_openmvs import run as openmvs_export
 from stages.openmvs.densify import run as openmvs_densify
 from stages.openmvs.mesh import run as openmvs_mesh
 from stages.openmvs.texture import run as openmvs_texture
 
-# MESH (COLMAP/Open3D)
+# FALLBACK MESH
 from stages.mesh.mesh_reconstruction import run as mesh_reconstruction
 
 
@@ -40,16 +40,19 @@ class PipelineRunner:
 
         self.base_config = deepcopy(config)
         self.config = deepcopy(config)
+
         self.tool_runner = ToolRunner(self.logger)
 
         self.max_adjustments = 2
 
         self._configure_pipeline()
+        self._configure_camera_policy()   # 🔥 NEW
 
     # =====================================================
     # PIPELINE CONFIGURATION
     # =====================================================
     def _configure_pipeline(self):
+
         if self.pipeline_type == "A":
             self.logger.info("Pipeline A: COLMAP full")
             self.config["sparse"]["backend"] = "colmap"
@@ -62,7 +65,9 @@ class PipelineRunner:
 
         elif self.pipeline_type == "C":
             self.logger.info("Pipeline C: COLMAP + OpenMVS")
+
             self.config["sparse"]["backend"] = "colmap"
+
             self.config["pipeline"]["dense_backend"] = "openmvs"
             self.config["pipeline"]["mesh_backend"] = "openmvs"
             self.config["pipeline"]["texture_backend"] = "openmvs"
@@ -71,7 +76,23 @@ class PipelineRunner:
             raise ValueError(f"Invalid pipeline type: {self.pipeline_type}")
 
     # =====================================================
-    # MAIN RUN
+    # 🔥 CAMERA POLICY (NEW CRITICAL FIX)
+    # =====================================================
+    def _configure_camera_policy(self):
+
+        # Default = best accuracy for COLMAP
+        camera_model = "OPENCV"
+
+        # Pipeline C → OpenMVS compatibility requirement
+        if self.pipeline_type == "C":
+            camera_model = "PINHOLE"
+
+        self.config["pipeline"]["camera_model"] = camera_model
+
+        self.logger.info(f"Camera model set to: {camera_model}")
+
+    # =====================================================
+    # MAIN ENTRY
     # =====================================================
     def run(self):
         self.logger.info("========== PIPELINE START ==========")
@@ -79,37 +100,12 @@ class PipelineRunner:
         self._run_ingestion()
         self._run_feature_pipeline()
         self._force_high_quality_start()
+        self._run_sparse_loop()
 
-        # -------------------------
-        # SPARSE LOOP
-        # -------------------------
-        for i in range(self.max_adjustments + 1):
-            self.logger.info(f"===== SPARSE PASS {i+1} =====")
-            self._run_mapper()
-
-            status = self._evaluate_sparse()
-            if status == "good":
-                self.logger.info("✅ Sparse reconstruction stable")
-                break
-            elif status == "too_low":
-                self._increase_quality()
-            elif status == "too_high":
-                self._decrease_quality()
-
-        # -------------------------
-        # DENSE
-        # -------------------------
         self.logger.info("===== DENSE RECONSTRUCTION =====")
         self._run_dense()
 
-        # -------------------------
-        # MESH
-        # -------------------------
         self._run_mesh()
-
-        # -------------------------
-        # TEXTURE
-        # -------------------------
         self._run_texture()
 
         self.logger.info("========== PIPELINE END ==========")
@@ -120,6 +116,7 @@ class PipelineRunner:
     def _run_ingestion(self):
         ingest_images(self.paths, self.config, self.logger)
         validate_images(self.paths, self.config, self.logger)
+
         if self.config.get("downsampling", {}).get("enabled", False):
             downsample_images(self.paths, self.config, self.logger)
 
@@ -131,10 +128,27 @@ class PipelineRunner:
         matching(self.paths, self.config, self.logger, self.tool_runner)
 
     # =====================================================
-    # SPARSE
+    # SPARSE LOOP
     # =====================================================
-    def _run_mapper(self):
-        mapper(self.paths, self.config, self.logger, self.tool_runner)
+    def _run_sparse_loop(self):
+        for i in range(self.max_adjustments + 1):
+            self.logger.info(f"===== SPARSE PASS {i+1} =====")
+
+            mapper(self.paths, self.config, self.logger, self.tool_runner)
+
+            status = self._evaluate_sparse()
+
+            if status == "good":
+                self.logger.info("✅ Sparse reconstruction stable")
+                return
+            elif status == "too_low":
+                self.logger.warning("Sparse too weak → increasing quality")
+                self._increase_quality()
+            elif status == "too_high":
+                self.logger.warning("Sparse too heavy → decreasing quality")
+                self._decrease_quality()
+
+        self.logger.warning("Sparse loop ended without ideal convergence")
 
     def _evaluate_sparse(self):
         pts_file = self.paths.sparse_model / "points3D.bin"
@@ -159,31 +173,31 @@ class PipelineRunner:
 
         if backend == "colmap":
             self._run_dense_colmap()
-
         elif backend == "openmvs":
             self._run_dense_openmvs()
-
         else:
             raise ValueError(f"Unknown dense backend: {backend}")
 
-    # -------------------------
+    # =====================================================
     # COLMAP DENSE
-    # -------------------------
+    # =====================================================
     def _run_dense_colmap(self):
         undistort(self.paths, self.config, self.logger, self.tool_runner)
+        patch_match(self.paths, self.config, self.logger, self.tool_runner)
+        stereo_fusion(self.paths, self.config, self.logger, self.tool_runner)
 
-        try:
-            patch_match(self.paths, self.config, self.logger, self.tool_runner)
-            stereo_fusion(self.paths, self.config, self.logger, self.tool_runner)
-        except Exception as e:
-            self.logger.warning(f"Dense failed → {e}")
-            raise
-
-    # -------------------------
-    # OPENMVS DENSE
-    # -------------------------
+    # =====================================================
+    # OPENMVS PIPELINE
+    # =====================================================
     def _run_dense_openmvs(self):
+
+        self.logger.info("---- UNDISTORT (REQUIRED FOR OPENMVS) ----")
+        undistort(self.paths, self.config, self.logger, self.tool_runner)
+
+        self.logger.info("---- OPENMVS EXPORT ----")
         openmvs_export(self.paths, self.config, self.logger, self.tool_runner)
+
+        self.logger.info("---- OPENMVS DENSIFY ----")
         openmvs_densify(self.paths, self.config, self.logger, self.tool_runner)
 
     # =====================================================
@@ -193,8 +207,10 @@ class PipelineRunner:
         backend = self.config["pipeline"].get("mesh_backend", "colmap")
 
         if backend == "openmvs":
+            self.logger.info("---- OPENMVS MESH ----")
             openmvs_mesh(self.paths, self.config, self.logger, self.tool_runner)
         else:
+            self.logger.info("---- COLMAP / FALLBACK MESH ----")
             mesh_reconstruction(self.paths, self.config, self.logger)
 
     # =====================================================
@@ -204,6 +220,7 @@ class PipelineRunner:
         backend = self.config["pipeline"].get("texture_backend", "colmap")
 
         if backend == "openmvs":
+            self.logger.info("---- OPENMVS TEXTURE ----")
             openmvs_texture(self.paths, self.config, self.logger, self.tool_runner)
         else:
             self.logger.info("Texture skipped (no backend)")

@@ -1,87 +1,116 @@
 from pathlib import Path
+import shutil
 
 
 # =====================================================
-# 🔍 VALIDATION HELPERS
+# 🔍 VALIDATE DENSE COLMAP WORKSPACE
 # =====================================================
 
-def _is_valid_model_dir(p: Path):
-    """Check if directory contains a valid COLMAP sparse model."""
-    return (
-        (p / "cameras.bin").exists()
-        and (p / "images.bin").exists()
-        and (p / "points3D.bin").exists()
-    )
+def _validate_dense_workspace(dense_dir: Path):
+    sparse_dir = dense_dir / "sparse"
+    image_dir = dense_dir / "images"
 
+    required = ["cameras.bin", "images.bin", "points3D.bin"]
 
-def _find_best_sparse_model(sparse_root: Path, logger):
-    """
-    Detect and select the best sparse model.
+    if not sparse_dir.exists():
+        raise RuntimeError("openmvs_export: missing dense/sparse")
 
-    Supports:
-    - flat layout: sparse/
-    - multi-model: sparse/0, sparse/1, ...
+    if not image_dir.exists():
+        raise RuntimeError("openmvs_export: missing dense/images")
 
-    Selection heuristic:
-    - largest points3D.bin (most complete reconstruction)
-    """
+    missing = [f for f in required if not (sparse_dir / f).exists()]
+    if missing:
+        raise RuntimeError(
+            f"openmvs_export: invalid dense sparse model → missing {missing}"
+        )
 
-    # Case 1: flat structure
-    if _is_valid_model_dir(sparse_root):
-        logger.info("openmvs_export: using flat sparse model")
-        return sparse_root
+    images = [p for p in image_dir.glob("*") if p.is_file()]
+    if not images:
+        raise RuntimeError("openmvs_export: no images found in dense/images")
 
-    # Case 2: multiple submodels
-    candidates = []
-
-    for sub in sparse_root.iterdir():
-        if sub.is_dir() and _is_valid_model_dir(sub):
-            points_file = sub / "points3D.bin"
-            size = points_file.stat().st_size
-            candidates.append((sub, size))
-
-    if not candidates:
-        raise RuntimeError("openmvs_export: no valid sparse models found")
-
-    # Select best model (largest reconstruction)
-    best_model, best_size = max(candidates, key=lambda x: x[1])
-
-    logger.info(
-        f"openmvs_export: selected model → {best_model.name} "
-        f"(points3D.bin size={best_size})"
-    )
-
-    return best_model
+    return sparse_dir, image_dir, images
 
 
 # =====================================================
-# 🚀 MAIN STAGE
+# 🏗️ BUILD OPENMVS WORKSPACE (CRITICAL FIX)
+# =====================================================
+
+def _build_openmvs_workspace(paths, sparse_dir, image_dir, images, logger):
+    workspace = (paths.run_root / "openmvs_workspace").resolve()
+    ws_images = workspace / "images"
+    ws_sparse = workspace / "sparse"
+
+    # 🔥 HARD RESET (prevents stale corruption)
+    if workspace.exists():
+        logger.warning("openmvs_export: clearing previous workspace")
+        shutil.rmtree(workspace)
+
+    ws_images.mkdir(parents=True, exist_ok=True)
+    ws_sparse.mkdir(parents=True, exist_ok=True)
+
+    # -------------------------------------------------
+    # 📸 COPY IMAGES (UNDISTORTED)
+    # -------------------------------------------------
+    logger.info("openmvs_export: copying undistorted images")
+
+    for img in images:
+        shutil.copy2(img, ws_images / img.name)
+
+    # -------------------------------------------------
+    # 📦 COPY SPARSE MODEL (FLATTENED)
+    # -------------------------------------------------
+    logger.info("openmvs_export: copying sparse model")
+
+    for fname in ["cameras.bin", "images.bin", "points3D.bin"]:
+        src = sparse_dir / fname
+        dst = ws_sparse / fname
+
+        if not src.exists():
+            raise RuntimeError(f"openmvs_export: missing {src}")
+
+        shutil.copy2(src, dst)
+
+    # -------------------------------------------------
+    # ✅ FINAL STRUCTURE CHECK
+    # -------------------------------------------------
+    if not ws_images.exists() or not ws_sparse.exists():
+        raise RuntimeError("openmvs_export: workspace build failed")
+
+    logger.info(f"openmvs_export: workspace ready → {workspace}")
+
+    return workspace
+
+
+# =====================================================
+# 🚀 MAIN EXPORT (FULLY FIXED)
 # =====================================================
 
 def run(paths, config, logger, tool_runner):
     stage = "openmvs_export"
     logger.info(f"---- {stage.upper()} ----")
 
-    sparse_root = paths.sparse
+    # =====================================================
+    # 1. VALIDATE INPUT (COLMAP DENSE OUTPUT)
+    # =====================================================
+    dense_dir = paths.dense.resolve()
 
-    # 🔥 IMPORTANT: use UNDISTORTED images
-    image_dir = paths.working / "images"
+    sparse_dir, image_dir, images = _validate_dense_workspace(dense_dir)
 
-    if not sparse_root.exists():
-        raise RuntimeError(f"{stage}: sparse folder missing → {sparse_root}")
-
-    if not image_dir.exists() or not any(image_dir.iterdir()):
-        raise RuntimeError(f"{stage}: undistorted images missing → {image_dir}")
+    logger.info(f"{stage}: using dense sparse → {sparse_dir}")
+    logger.info(f"{stage}: using dense images → {image_dir}")
+    logger.info(f"{stage}: image count = {len(images)}")
 
     # =====================================================
-    # 🔍 FIND BEST SPARSE MODEL
+    # 2. BUILD CLEAN OPENMVS WORKSPACE
     # =====================================================
-    sparse_model = _find_best_sparse_model(sparse_root, logger)
+    workspace = _build_openmvs_workspace(
+        paths, sparse_dir, image_dir, images, logger
+    )
 
     # =====================================================
-    # 📁 OUTPUT DIR (OpenMVS workspace)
+    # 3. OPENMVS OUTPUT DIR
     # =====================================================
-    mvs_dir = paths.run_root / "openmvs"
+    mvs_dir = (paths.run_root / "openmvs").resolve()
     mvs_dir.mkdir(parents=True, exist_ok=True)
 
     scene_file = mvs_dir / "scene.mvs"
@@ -90,31 +119,31 @@ def run(paths, config, logger, tool_runner):
         logger.warning(f"{stage}: removing old scene.mvs")
         scene_file.unlink()
 
-    logger.info(f"{stage}: exporting COLMAP → OpenMVS")
-
     # =====================================================
-    # 🔥 CORRECT COMMAND (FIXED)
+    # 4. COMMAND (STRICT WORKSPACE MODE)
     # =====================================================
     cmd = [
         "InterfaceCOLMAP",
 
-        # COLMAP sparse model (REQUIRED)
-        "-i", str(sparse_model),
-
-        # 🔥 CORRECT FLAG (capital I)
-        "-I", str(image_dir),
+        # 🔥 CRITICAL: pass workspace ROOT (not sparse!)
+        "-i", str(workspace),
 
         # output
         "-o", str(scene_file),
+
+        # OpenMVS working dir
         "-w", str(mvs_dir),
     ]
 
     logger.info(f"[{stage}] COMMAND:\n{' '.join(cmd)}")
 
+    # =====================================================
+    # 5. EXECUTION
+    # =====================================================
     tool_runner.run(cmd, stage=stage)
 
     # =====================================================
-    # ✅ VALIDATION
+    # 6. VALIDATION
     # =====================================================
     if not scene_file.exists():
         raise RuntimeError(f"{stage}: scene.mvs not created")

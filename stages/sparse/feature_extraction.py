@@ -8,27 +8,28 @@ VALID_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 # HELPERS
 # =====================================================
 def _get_valid_images(folder: Path):
-    return [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in VALID_EXT]
+    return [
+        p for p in folder.iterdir()
+        if p.is_file() and p.suffix.lower() in VALID_EXT
+    ]
 
 
 def _has_features(db: Path):
     if not db.exists():
         return False
+
     try:
         conn = sqlite3.connect(db)
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM keypoints;")
-        n = cur.fetchone()[0]
+        count = cur.fetchone()[0]
         conn.close()
-        return n > 0
+        return count > 0
     except Exception:
         return False
 
 
 def _resolve_image_dir(paths, config, logger):
-    """
-    Prefer downsampled images if enabled and valid.
-    """
     downsample_enabled = config.get("downsampling", {}).get("enabled", False)
 
     if downsample_enabled and paths.images_downsampled.exists():
@@ -56,58 +57,64 @@ def run(paths, config, logger, tool_runner):
     database_path = paths.database
 
     # =====================================================
-    # 🔥 FORCE CLEAN REBUILD (IMPORTANT)
+    # CLEAN DATABASE
     # =====================================================
     if database_path.exists():
         logger.warning(f"{stage}: removing existing database")
         database_path.unlink()
 
     # =====================================================
-    # 🔥 BALANCED HIGH-COVERAGE CONFIG
+    # SIFT CONFIG
     # =====================================================
     sift_cfg = config.get("sift", {})
     use_gpu = sift_cfg.get("use_gpu", True)
 
-    # 🔥 KEY BALANCE (not overkill)
-    max_features = 18000
-    max_img_size = 2800
+    max_features = sift_cfg.get("max_num_features", 18000)
+    max_img_size = sift_cfg.get("max_image_size", 2800)
 
-    # 🔥 OPTIONAL BOOST (controlled)
-    peak_threshold = 0.003     # lower → more features, but not noisy
-    edge_threshold = 10        # keep stable edges
-    first_octave = -1          # capture fine details
+    peak_threshold = sift_cfg.get("peak_threshold", 0.003)
+    edge_threshold = sift_cfg.get("edge_threshold", 10)
+    first_octave = sift_cfg.get("first_octave", -1)
+
+    # =====================================================
+    # CAMERA MODEL (🔥 CRITICAL FIX FOR PIPELINE C)
+    # =====================================================
+    camera_model = config.get("pipeline", {}).get("camera_model", "OPENCV")
 
     logger.info(
-        f"{stage}: BALANCED COVERAGE MODE | "
-        f"features={max_features}, img_size={max_img_size}, "
-        f"peak={peak_threshold}"
+        f"{stage}: config → features={max_features}, "
+        f"img_size={max_img_size}, camera_model={camera_model}"
     )
 
     # =====================================================
-    # 🔥 COMMAND BUILDER
+    # COMMAND BUILDER
     # =====================================================
     def _build_cmd(use_gpu_flag):
         return [
             "colmap", "feature_extractor",
+
             "--database_path", str(database_path),
             "--image_path", str(image_dir),
 
+            # GPU / CPU
             "--SiftExtraction.use_gpu", str(int(use_gpu_flag)),
             "--SiftExtraction.gpu_index", "0" if use_gpu_flag else "-1",
 
+            # SIFT params
             "--SiftExtraction.max_num_features", str(max_features),
             "--SiftExtraction.max_image_size", str(max_img_size),
-
-            # 🔥 CRITICAL TUNING
             "--SiftExtraction.peak_threshold", str(peak_threshold),
             "--SiftExtraction.edge_threshold", str(edge_threshold),
             "--SiftExtraction.first_octave", str(first_octave),
+
+            # 🔥 CAMERA MODEL FIX
+            "--ImageReader.camera_model", camera_model,
 
             "--SiftExtraction.num_threads", "-1",
         ]
 
     # =====================================================
-    # 🔥 EXECUTION (GPU → CPU)
+    # EXECUTION (GPU → CPU fallback)
     # =====================================================
     try:
         if use_gpu:
@@ -122,12 +129,11 @@ def run(paths, config, logger, tool_runner):
         tool_runner.run(_build_cmd(False), stage=stage + "_cpu")
 
     # =====================================================
-    # 🔥 VALIDATION
+    # VALIDATION
     # =====================================================
     if not _has_features(database_path):
         raise RuntimeError(f"{stage}: extraction failed")
 
-    # Diagnostics
     conn = sqlite3.connect(database_path)
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM keypoints;")
