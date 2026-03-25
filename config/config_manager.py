@@ -1,5 +1,6 @@
 from copy import deepcopy
 
+
 # =====================================================
 # DEFAULT CONFIG
 # =====================================================
@@ -7,18 +8,19 @@ from copy import deepcopy
 DEFAULT_CONFIG = {
 
     # =====================================================
-    # GLOBAL PIPELINE CONTROL
+    # PIPELINE CONTROL
     # =====================================================
     "pipeline": {
         "name": "adaptive_multibackend_sfm",
-
-        # master mode
         "mode": "mesh",
 
-        "sparse_backend": "colmap",
-        "dense_backend": "colmap",
-        "mesh_backend": "colmap",
-        "texture_backend": "colmap",
+        # SINGLE SOURCE OF TRUTH
+        "backends": {
+            "sparse": "colmap",   # colmap | glomap | openmvg
+            "dense": "colmap",    # colmap | openmvs
+            "mesh": "colmap",     # colmap | openmvs | hybrid
+            "texture": "colmap"   # colmap | openmvs
+        },
 
         # camera model policy
         "camera_model": "auto"   # auto | pinhole | opencv
@@ -47,7 +49,7 @@ DEFAULT_CONFIG = {
     },
 
     # =====================================================
-    # FEATURE EXTRACTION
+    # FEATURE EXTRACTION (COLMAP ONLY)
     # =====================================================
     "sift": {
         "max_num_features": 16000,
@@ -58,7 +60,7 @@ DEFAULT_CONFIG = {
     },
 
     # =====================================================
-    # MATCHING
+    # MATCHING (COLMAP ONLY)
     # =====================================================
     "matching": {
         "type": "exhaustive",
@@ -69,7 +71,7 @@ DEFAULT_CONFIG = {
     # SPARSE BACKENDS
     # =====================================================
     "sparse": {
-        "backend": "colmap",
+
         "fallback_to_colmap": True,
 
         "colmap": {
@@ -87,9 +89,17 @@ DEFAULT_CONFIG = {
             "robust_loss": "Cauchy",
         },
 
+        # 🔥 FULL OPENMVG CONFIG
         "openmvg": {
             "feature_type": "SIFT",
             "matching_strategy": "FASTCASCADEHASHINGL2",
+
+            # NEW (IMPORTANT)
+            "camera_model": "PINHOLE",   # PINHOLE recommended
+            "num_threads": -1,
+
+            # optional future tuning
+            "geometric_model": "f",      # f, e, h
         }
     },
 
@@ -97,7 +107,6 @@ DEFAULT_CONFIG = {
     # DENSE BACKENDS
     # =====================================================
     "dense": {
-        "backend": "colmap",
 
         "colmap": {
             "window_radius": 7,
@@ -124,7 +133,6 @@ DEFAULT_CONFIG = {
     # MESH BACKENDS
     # =====================================================
     "mesh": {
-        "backend": "colmap",
 
         "colmap": {},
 
@@ -142,7 +150,6 @@ DEFAULT_CONFIG = {
     # TEXTURE BACKENDS
     # =====================================================
     "texture": {
-        "backend": "colmap",
 
         "openmvs": {
             "resolution": 4096
@@ -169,16 +176,6 @@ DEFAULT_CONFIG = {
     "analysis_results": {},
 
     # =====================================================
-    # LIMITS
-    # =====================================================
-    "limits": {
-        "sift_max_features": [8000, 20000],
-        "window_radius": [3, 9],
-        "num_samples": [10, 30],
-        "min_num_pixels": [2, 10]
-    },
-
-    # =====================================================
     # META
     # =====================================================
     "_meta": {
@@ -198,28 +195,42 @@ def load_config(user_config=None):
     if user_config:
         _deep_update(config, user_config)
 
-    # =====================================================
-    # 🔥 PIPELINE-AWARE CAMERA MODEL LOGIC
-    # =====================================================
+    _resolve_camera_model(config)
 
+    return config
+
+
+# =====================================================
+# CAMERA MODEL LOGIC (UPDATED)
+# =====================================================
+
+def _resolve_camera_model(config):
     pipeline = config["pipeline"]
+    backends = pipeline["backends"]
 
-    # default: best COLMAP accuracy
+    sparse_backend = backends["sparse"]
+    dense_backend = backends["dense"]
+    mesh_backend = backends["mesh"]
+
+    # Default: COLMAP best accuracy
     camera_model = "OPENCV"
 
-    # Pipeline C → OpenMVS compatibility mode
-    if pipeline["mesh_backend"] in ["openmvs", "hybrid"] or pipeline["dense_backend"] == "openmvs":
+    # OpenMVS compatibility → MUST use PINHOLE
+    if dense_backend == "openmvs" or mesh_backend in ["openmvs", "hybrid"]:
         camera_model = "PINHOLE"
 
-    # explicit override
-    if pipeline.get("camera_model") == "pinhole":
+    # OpenMVG prefers PINHOLE (safer default)
+    if sparse_backend == "openmvg":
         camera_model = "PINHOLE"
-    elif pipeline.get("camera_model") == "opencv":
+
+    # Explicit override
+    user_choice = pipeline.get("camera_model")
+    if user_choice == "pinhole":
+        camera_model = "PINHOLE"
+    elif user_choice == "opencv":
         camera_model = "OPENCV"
 
     config["pipeline"]["camera_model"] = camera_model
-
-    return config
 
 
 # =====================================================

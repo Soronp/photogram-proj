@@ -1,6 +1,7 @@
 import subprocess
 import time
 from pathlib import Path
+from typing import List, Union, Optional
 
 
 class ToolRunner:
@@ -9,38 +10,59 @@ class ToolRunner:
 
     def run(
         self,
-        cmd,
-        cwd: Path = None,
-        env: dict = None,
+        cmd: Union[str, List[str]],
+        cwd: Optional[Path] = None,
+        env: Optional[dict] = None,
         stage: str = "unknown",
         allow_failure: bool = False,
+        timeout: Optional[int] = None,
+        quiet: bool = False,
     ):
         """
-        Execute external command with logging + timing.
+        Execute external command with logging, streaming, and timing.
+
+        Returns:
+            {
+                "elapsed": float,
+                "returncode": int
+            }
         """
 
-        cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
+        cmd_str = cmd if isinstance(cmd, str) else " ".join(map(str, cmd))
 
-        self.logger.info(f"[{stage}] COMMAND:")
-        self.logger.info(cmd_str)
+        if not quiet:
+            self.logger.info(f"[{stage}] COMMAND:")
+            self.logger.info(cmd_str)
 
         start_time = time.time()
 
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=cwd,
-            env=env,
-            text=True,
-        )
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=str(cwd) if cwd else None,
+                env=env,
+                text=True,
+                bufsize=1,
+            )
 
-        # Stream output
-        for line in iter(process.stdout.readline, ""):
-            if line:
-                self.logger.info(f"[{stage}] {line.strip()}")
+            # Stream output live
+            for line in iter(process.stdout.readline, ""):
+                if line:
+                    if not quiet:
+                        self.logger.info(f"[{stage}] {line.strip()}")
 
-        process.wait()
+            process.wait(timeout=timeout)
+
+        except subprocess.TimeoutExpired:
+            process.kill()
+            msg = f"[{stage}] TIMEOUT after {timeout}s"
+            self.logger.error(msg)
+            if not allow_failure:
+                raise RuntimeError(msg)
+            return {"elapsed": None, "returncode": -1}
+
         elapsed = time.time() - start_time
 
         self.logger.info(f"[{stage}] Finished in {elapsed:.2f}s")
@@ -52,4 +74,7 @@ class ToolRunner:
             if not allow_failure:
                 raise RuntimeError(msg)
 
-        return elapsed
+        return {
+            "elapsed": elapsed,
+            "returncode": process.returncode
+        }

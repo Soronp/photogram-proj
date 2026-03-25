@@ -51,9 +51,10 @@ def get_pipeline_choice():
     print("A → COLMAP full")
     print("B → GLOMAP + COLMAP dense")
     print("C → COLMAP + OpenMVS (full MVS pipeline)")
+    print("D → OpenMVG (SfM only)")  # 🔥 NEW
 
     choice = input("Select pipeline [A]: ").strip().upper()
-    return choice if choice in ["A", "B", "C"] else "A"
+    return choice if choice in ["A", "B", "C", "D"] else "A"
 
 
 # =====================================================
@@ -61,18 +62,39 @@ def get_pipeline_choice():
 # =====================================================
 def get_user_config(project_root: Path, image_source: Path, pipeline_choice: str):
 
+    # 🔥 Updated backend mapping
     backend_map = {
         "A": "colmap",
         "B": "glomap",
-        "C": "colmap"
+        "C": "colmap",
+        "D": "openmvg"   # NEW
     }
 
+    # Base config
     user_config = {
         "paths": {"project_root": str(project_root)},
         "ingestion": {"external_image_path": str(image_source)},
         "downsampling": {"enabled": True},
         "sparse": {"backend": backend_map[pipeline_choice]},
     }
+
+    # 🔥 Pipeline-specific overrides
+    if pipeline_choice == "C":
+        user_config.setdefault("pipeline", {})
+        user_config["pipeline"].update({
+            "dense_backend": "openmvs",
+            "mesh_backend": "openmvs",
+            "texture_backend": "openmvs",
+        })
+
+    if pipeline_choice == "D":
+        # OpenMVG = sparse only (for now)
+        user_config.setdefault("pipeline", {})
+        user_config["pipeline"].update({
+            "dense_backend": None,
+            "mesh_backend": None,
+            "texture_backend": None,
+        })
 
     return user_config
 
