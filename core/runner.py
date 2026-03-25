@@ -61,6 +61,7 @@ class PipelineRunner:
             self.logger.info("Pipeline B: GLOMAP + COLMAP dense")
             self.config["sparse"]["backend"] = "glomap"
             self.config["pipeline"]["dense_backend"] = "colmap"
+            self.config["pipeline"]["mesh_backend"] = "colmap"
 
         elif self.pipeline_type == "C":
             self.logger.info("Pipeline C: COLMAP + OpenMVS")
