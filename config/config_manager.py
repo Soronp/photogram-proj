@@ -1,11 +1,9 @@
 from copy import deepcopy
 from pathlib import Path
 
-
 # =====================================================
 # DEFAULT CONFIG
 # =====================================================
-
 DEFAULT_CONFIG = {
 
     # =====================================================
@@ -14,6 +12,7 @@ DEFAULT_CONFIG = {
     "pipeline": {
         "name": "adaptive_multibackend_sfm",
         "mode": "mesh",
+        "mode_variant": "default",  # "D" for OpenMVS optimized
 
         "backends": {
             "sparse": "colmap",   # colmap | glomap | openmvg
@@ -30,7 +29,7 @@ DEFAULT_CONFIG = {
     # PATHS
     # =====================================================
     "paths": {
-        "project_root": None,
+        "project_root": None
     },
 
     # =====================================================
@@ -96,24 +95,24 @@ DEFAULT_CONFIG = {
         },
 
         # -------------------------
-        # OPENMVG (🔥 FIXED)
+        # OPENMVG
         # -------------------------
         "openmvg": {
             "feature_type": "SIFT",
-            "matching_strategy": "ANNL2",   # stronger default
+            "matching_strategy": "ANNL2",
 
             # CAMERA SETTINGS
-            "camera_model": "PINHOLE",     # safest for OpenMVG
+            "camera_model": "PINHOLE",
             "num_threads": -1,
 
-            # 🔥 CRITICAL FIX (YOUR PATH)
+            # CRITICAL FIX
             "sensor_database": "D:/CSE499_MK-2/OpenMVG/sensor_width_database/sensor_width_camera_database.txt",
 
             # MATCHING / GEOMETRY
-            "geometric_model": "e",        # e = essential matrix (better default)
+            "geometric_model": "e",
             "guided_matching": True,
 
-            # FALLBACK IF DB FAILS
+            # FALLBACK
             "fallback_focal_multiplier": 1.2
         }
     },
@@ -133,7 +132,21 @@ DEFAULT_CONFIG = {
         "openmvs": {
             "resolution_level": 1,
             "number_views": 6,
-            "use_gpu": True
+            "use_gpu": True,
+
+            # Pipeline D overrides
+            "pipeline_D": {
+                "resolution_level": 0,
+                "number_views": 8,
+                "number_views_fuse": 5,
+                "fusion_filter": 0,
+                "filter_point_cloud": 0,
+                "estimate_colors": 2,
+                "estimate_normals": 2,
+                "min_resolution": 640,
+                "max_resolution": 6000,
+                "sub_resolution_levels": 2
+            }
         }
     },
 
@@ -165,7 +178,6 @@ DEFAULT_CONFIG = {
     # TEXTURE BACKENDS
     # =====================================================
     "texture": {
-
         "openmvs": {
             "resolution": 4096
         }
@@ -199,11 +211,9 @@ DEFAULT_CONFIG = {
     }
 }
 
-
 # =====================================================
 # LOAD CONFIG
 # =====================================================
-
 def load_config(user_config=None):
     config = deepcopy(DEFAULT_CONFIG)
 
@@ -215,11 +225,9 @@ def load_config(user_config=None):
 
     return config
 
-
 # =====================================================
 # CAMERA MODEL RESOLUTION
 # =====================================================
-
 def _resolve_camera_model(config):
     pipeline = config["pipeline"]
     backends = pipeline["backends"]
@@ -237,7 +245,6 @@ def _resolve_camera_model(config):
         camera_model = "PINHOLE"
 
     user_choice = pipeline.get("camera_model")
-
     if user_choice == "pinhole":
         camera_model = "PINHOLE"
     elif user_choice == "opencv":
@@ -245,20 +252,16 @@ def _resolve_camera_model(config):
 
     config["pipeline"]["camera_model"] = camera_model
 
-
 # =====================================================
-# 🔥 OPENMVG VALIDATION (NEW)
+# OPENMVG VALIDATION
 # =====================================================
-
 def _validate_openmvg(config):
     sparse_backend = config["pipeline"]["backends"]["sparse"]
-
     if sparse_backend != "openmvg":
         return
 
     openmvg_cfg = config["sparse"]["openmvg"]
     sensor_db = openmvg_cfg.get("sensor_database")
-
     if sensor_db:
         db_path = Path(sensor_db)
         if not db_path.exists():
@@ -266,20 +269,16 @@ def _validate_openmvg(config):
                 f"[OpenMVG] Sensor database not found: {sensor_db}"
             )
 
-
 # =====================================================
 # ANALYSIS INJECTION
 # =====================================================
-
 def inject_analysis(config, stats):
     config["analysis_results"] = stats
     return config
 
-
 # =====================================================
 # DEEP UPDATE
 # =====================================================
-
 def _deep_update(base, updates):
     for k, v in updates.items():
         if isinstance(v, dict) and k in base:

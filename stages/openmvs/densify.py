@@ -27,29 +27,63 @@ def run(paths, config, logger, tool_runner):
     number_views = cfg.get("number_views", 6)
     cuda_device = cfg.get("cuda_device", 0)
 
+    # 🔥 PIPELINE MODE SWITCH
+    pipeline_mode = config.get("pipeline_mode", "default")
+
     # =====================================================
     # 🧠 COMMAND BUILDER
     # =====================================================
     def build_cmd(device):
-        return [
+        cmd = [
             "DensifyPointCloud",
             "-i", str(scene),
             "-w", str(mvs_dir),
 
             "--cuda-device", str(device),
-
-            "--resolution-level", str(resolution),
-            "--number-views", str(number_views),
-
-            "--fusion-filter", "2",
-            "--filter-point-cloud", "1",
-            "--estimate-colors", "2",
-            "--estimate-normals", "2",
-            "--number-views-fuse", "3",
         ]
 
+        # =================================================
+        # 🚀 PIPELINE D (MAX DETAIL / OPENMVG-FRIENDLY)
+        # =================================================
+        if pipeline_mode == "D":
+            logger.info(f"[{stage}] Using Pipeline D (high detail mode)")
+
+            cmd += [
+                "--resolution-level", "0",        # 🔥 full resolution
+                "--number-views", "8",            # 🔥 more neighbors
+                "--number-views-fuse", "5",
+
+                "--fusion-filter", "0",           # 🔥 NO aggressive filtering
+                "--filter-point-cloud", "0",      # 🔥 keep weak points
+
+                "--estimate-colors", "2",
+                "--estimate-normals", "2",
+
+                "--min-resolution", "640",        # 🔥 prevent over-downscale
+                "--max-resolution", "6000",
+
+                "--sub-resolution-levels", "2",   # 🔥 multi-scale depth
+            ]
+
+        # =================================================
+        # ⚙️ DEFAULT PIPELINE (UNCHANGED)
+        # =================================================
+        else:
+            cmd += [
+                "--resolution-level", str(resolution),
+                "--number-views", str(number_views),
+
+                "--fusion-filter", "2",
+                "--filter-point-cloud", "1",
+                "--estimate-colors", "2",
+                "--estimate-normals", "2",
+                "--number-views-fuse", "3",
+            ]
+
+        return cmd
+
     # =====================================================
-    # 🧪 EXECUTION WITH FULL DEBUG CAPTURE
+    # 🧪 EXECUTION
     # =====================================================
     def run_process(cmd, tag):
         logger.info(f"[{stage}] RUNNING ({tag})")
@@ -78,29 +112,10 @@ def run(paths, config, logger, tool_runner):
     code = run_process(build_cmd(cuda_device), "GPU")
 
     # =====================================================
-    # 🔥 SMART FAILURE ANALYSIS
+    # 🔁 CPU FALLBACK
     # =====================================================
     if code != 0:
-        logger.warning(f"{stage}: GPU FAILED → analyzing issue")
-
-        error_text = openmvs_error_hint = ""
-
-        # simple classification
-        if "CUDA" in error_text or "cuda" in error_text:
-            openmvs_error_hint = "CUDA/GPU crash or unsupported compute capability"
-        elif "scene" in error_text or "input" in error_text:
-            openmvs_error_hint = "Invalid or corrupted scene.mvs"
-        elif "memory" in error_text or "alloc" in error_text:
-            openmvs_error_hint = "Out of memory during densification"
-        else:
-            openmvs_error_hint = "Unknown OpenMVS internal failure"
-
-        logger.error(f"{stage}: ROOT CAUSE GUESS → {openmvs_error_hint}")
-
-        # =================================================
-        # 🧯 CPU FALLBACK (REAL)
-        # =================================================
-        logger.info(f"{stage}: retrying on CPU (-2)")
+        logger.warning(f"{stage}: GPU FAILED → retrying on CPU")
         code = run_process(build_cmd(-2), "CPU")
 
         if code != 0:
@@ -109,7 +124,7 @@ def run(paths, config, logger, tool_runner):
             )
 
     # =====================================================
-    # ✅ OUTPUT VALIDATION (REAL CHECK)
+    # ✅ OUTPUT VALIDATION
     # =====================================================
     dense_scene = mvs_dir / "scene_dense.mvs"
 
