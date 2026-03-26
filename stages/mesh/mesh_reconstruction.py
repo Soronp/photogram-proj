@@ -12,7 +12,7 @@ def _set_determinism():
 
 
 # =====================================================
-# COLMAP CAMERA LOADING
+# CAMERA LOADING
 # =====================================================
 def _qvec_to_rotmat(qvec):
     w, x, y, z = qvec
@@ -30,14 +30,13 @@ def _load_camera_centers(images_bin):
         num_images = struct.unpack("<Q", f.read(8))[0]
 
         for _ in range(num_images):
-            f.read(4)  # image_id
+            f.read(4)
 
             qvec = struct.unpack("<4d", f.read(32))
             tvec = struct.unpack("<3d", f.read(24))
 
-            f.read(4)  # camera_id
+            f.read(4)
 
-            # read name
             while True:
                 if f.read(1) == b"\x00":
                     break
@@ -51,7 +50,23 @@ def _load_camera_centers(images_bin):
             center = -R.T @ t
             centers.append(center)
 
-    return np.array(centers)
+    centers = np.array(centers)
+
+    # 🔥 CRITICAL FIX: VALIDATION
+    if centers.size == 0:
+        return None
+
+    if centers.ndim != 2 or centers.shape[1] != 3:
+        return None
+
+    # Remove NaN / Inf
+    mask = np.isfinite(centers).all(axis=1)
+    centers = centers[mask]
+
+    if len(centers) == 0:
+        return None
+
+    return centers
 
 
 # =====================================================
@@ -65,43 +80,77 @@ def _compute_scale(pcd):
 
 
 # =====================================================
-# NORMALS (CAMERA-BASED)
+# NORMALS (ROBUST)
 # =====================================================
 def _compute_normals(pcd, camera_centers, logger):
-    logger.info("mesh: computing camera-aware normals")
+    logger.info("mesh: computing stable normals")
 
     scale = _compute_scale(pcd)
-    radius = scale * 0.01
+    radius = scale * 0.015
 
+    # Step 1: Estimate
     pcd.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(
             radius=radius,
-            max_nn=50
+            max_nn=60
         )
     )
 
-    # local consistency
-    pcd.orient_normals_consistent_tangent_plane(100)
+    # Step 2: Local consistency
+    pcd.orient_normals_consistent_tangent_plane(200)
+
+    # -------------------------------------------------
+    # 🔥 SAFE CAMERA-BASED ORIENTATION
+    # -------------------------------------------------
+    if camera_centers is None or len(camera_centers) < 2:
+        logger.warning("mesh: camera centers invalid → fallback to Open3D orientation")
+        pcd.orient_normals_towards_camera_location(pcd.get_center())
+        return pcd
+
+    try:
+        cam_tree = o3d.geometry.KDTreeFlann(
+            o3d.utility.Vector3dVector(camera_centers)
+        )
+    except Exception as e:
+        logger.warning(f"mesh: KDTree build failed → {e}")
+        pcd.orient_normals_towards_camera_location(pcd.get_center())
+        return pcd
 
     pts = np.asarray(pcd.points)
     normals = np.asarray(pcd.normals)
 
-    # 🔥 camera-based orientation
+    valid_count = 0
+
     for i in range(len(pts)):
-        p = pts[i]
-        n = normals[i]
+        try:
+            p = pts[i]
+            n = normals[i]
 
-        votes = 0
-        for cam in camera_centers:
-            view = p - cam
-            votes += 1 if np.dot(n, view) > 0 else -1
+            k, idx, _ = cam_tree.search_knn_vector_3d(p, 1)
 
-        if votes < 0:
-            normals[i] *= -1
+            if k < 1:
+                continue
+
+            cam = camera_centers[idx[0]]
+            view_dir = p - cam
+
+            if np.dot(n, view_dir) < 0:
+                normals[i] *= -1
+
+            valid_count += 1
+
+        except Exception:
+            continue  # 🔥 NEVER CRASH
+
+    if valid_count == 0:
+        logger.warning("mesh: camera orientation failed → fallback")
+        pcd.orient_normals_towards_camera_location(pcd.get_center())
+    else:
+        logger.info(f"mesh: oriented {valid_count} points using cameras")
 
     pcd.normals = o3d.utility.Vector3dVector(normals)
 
-    return pcd, scale
+    return pcd
 
 
 # =====================================================
@@ -110,23 +159,20 @@ def _compute_normals(pcd, camera_centers, logger):
 def _run_poisson(pcd, logger):
     pts = len(pcd.points)
 
-    depth = 12 if pts > 1_000_000 else 11 if pts > 400_000 else 10
+    depth = 11 if pts > 500_000 else 10
     logger.info(f"mesh: poisson depth = {depth}")
 
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
         pcd,
         depth=depth,
-        scale=1.03,
+        scale=1.02,
         linear_fit=True
     )
 
     densities = np.asarray(densities)
-    thresh = np.quantile(densities, 0.02)
-    mesh.remove_vertices_by_mask(densities < thresh)
 
-    mesh.remove_degenerate_triangles()
-    mesh.remove_duplicated_triangles()
-    mesh.remove_non_manifold_edges()
+    thresh = np.quantile(densities, 0.05)
+    mesh.remove_vertices_by_mask(densities < thresh)
 
     return mesh
 
@@ -143,29 +189,15 @@ def _trim(mesh, pcd):
 
     keep = []
     for i, v in enumerate(verts):
-        _, _, d = kdtree.search_knn_vector_3d(v, 1)
-        if len(d) and d[0] < avg_dist * 2.0:
-            keep.append(i)
+        try:
+            k, _, d = kdtree.search_knn_vector_3d(v, 1)
+            if k > 0 and d[0] < avg_dist * 1.5:
+                keep.append(i)
+        except Exception:
+            continue
 
     mesh = mesh.select_by_index(keep)
     mesh.remove_unreferenced_vertices()
-
-    return mesh, avg_dist
-
-
-# =====================================================
-# BPA (STABLE)
-# =====================================================
-def _run_bpa(pcd, avg_dist):
-    radii = [avg_dist * 1.5, avg_dist * 2.0]
-
-    mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-        pcd,
-        o3d.utility.DoubleVector(radii)
-    )
-
-    mesh.remove_degenerate_triangles()
-    mesh.remove_non_manifold_edges()
 
     return mesh
 
@@ -177,7 +209,7 @@ def _clean(mesh):
     clusters, counts, _ = mesh.cluster_connected_triangles()
     counts = np.array(counts)
 
-    keep = counts > (0.02 * counts.max())
+    keep = counts > (0.05 * counts.max())
     mask = [not keep[c] for c in clusters]
 
     mesh.remove_triangles_by_mask(mask)
@@ -195,55 +227,35 @@ def _clean(mesh):
 def run(paths, config, logger):
     _set_determinism()
 
-    logger.info("---- MESH_RECONSTRUCTION ----")
+    logger.info("---- MESH_RECONSTRUCTION (ROBUST FIXED) ----")
 
     if not paths.fused.exists():
         raise RuntimeError("fused.ply missing")
 
     images_bin = paths.dense / "sparse" / "images.bin"
     if not images_bin.exists():
-        raise RuntimeError("images.bin required for stable normals")
-
-    logger.info("mesh: loading data")
+        raise RuntimeError("images.bin required")
 
     pcd = o3d.io.read_point_cloud(str(paths.fused))
 
     if len(pcd.points) < 5000:
         raise RuntimeError("insufficient points")
 
-    # downsample
     if len(pcd.points) > 1_500_000:
-        pcd = pcd.voxel_down_sample(0.0025)
+        pcd = pcd.voxel_down_sample(0.003)
 
-    # denoise
-    pcd, _ = pcd.remove_statistical_outlier(16, 3.0)
+    pcd, _ = pcd.remove_statistical_outlier(20, 2.5)
 
-    # load cameras
     camera_centers = _load_camera_centers(images_bin)
 
-    # normals
-    pcd, _ = _compute_normals(pcd, camera_centers, logger)
+    pcd = _compute_normals(pcd, camera_centers, logger)
 
-    # poisson
     mesh = _run_poisson(pcd, logger)
-
-    # trim
-    mesh, avg_dist = _trim(mesh, pcd)
-
-    # BPA (reduced influence)
-    mesh_bpa = _run_bpa(pcd, avg_dist)
-
-    mesh += mesh_bpa
-    mesh.remove_duplicated_vertices()
-
-    # clean
+    mesh = _trim(mesh, pcd)
     mesh = _clean(mesh)
 
-    # final normals
     mesh.compute_vertex_normals()
-    mesh.orient_triangles()
 
-    # save
     o3d.io.write_triangle_mesh(str(paths.mesh_file), mesh)
 
     logger.info(f"mesh: SUCCESS → {paths.mesh_file}")

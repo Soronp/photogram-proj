@@ -1,4 +1,5 @@
 from copy import deepcopy
+from pathlib import Path
 
 
 # =====================================================
@@ -14,16 +15,15 @@ DEFAULT_CONFIG = {
         "name": "adaptive_multibackend_sfm",
         "mode": "mesh",
 
-        # SINGLE SOURCE OF TRUTH
         "backends": {
             "sparse": "colmap",   # colmap | glomap | openmvg
             "dense": "colmap",    # colmap | openmvs
             "mesh": "colmap",     # colmap | openmvs | hybrid
-            "texture": "colmap"   # colmap | openmvs
+            "texture": "colmap"
         },
 
-        # camera model policy
-        "camera_model": "auto"   # auto | pinhole | opencv
+        # auto-resolved later
+        "camera_model": "auto"
     },
 
     # =====================================================
@@ -49,7 +49,7 @@ DEFAULT_CONFIG = {
     },
 
     # =====================================================
-    # FEATURE EXTRACTION (COLMAP ONLY)
+    # COLMAP FEATURES
     # =====================================================
     "sift": {
         "max_num_features": 16000,
@@ -60,7 +60,7 @@ DEFAULT_CONFIG = {
     },
 
     # =====================================================
-    # MATCHING (COLMAP ONLY)
+    # COLMAP MATCHING
     # =====================================================
     "matching": {
         "type": "exhaustive",
@@ -74,6 +74,9 @@ DEFAULT_CONFIG = {
 
         "fallback_to_colmap": True,
 
+        # -------------------------
+        # COLMAP
+        # -------------------------
         "colmap": {
             "init_min_inliers": 40,
             "abs_min_inliers": 30,
@@ -83,23 +86,35 @@ DEFAULT_CONFIG = {
             "use_gpu": True
         },
 
+        # -------------------------
+        # GLOMAP
+        # -------------------------
         "glomap": {
             "num_threads": -1,
             "use_rotation_averaging": True,
             "robust_loss": "Cauchy",
         },
 
-        # 🔥 FULL OPENMVG CONFIG
+        # -------------------------
+        # OPENMVG (🔥 FIXED)
+        # -------------------------
         "openmvg": {
             "feature_type": "SIFT",
-            "matching_strategy": "FASTCASCADEHASHINGL2",
+            "matching_strategy": "ANNL2",   # stronger default
 
-            # NEW (IMPORTANT)
-            "camera_model": "PINHOLE",   # PINHOLE recommended
+            # CAMERA SETTINGS
+            "camera_model": "PINHOLE",     # safest for OpenMVG
             "num_threads": -1,
 
-            # optional future tuning
-            "geometric_model": "f",      # f, e, h
+            # 🔥 CRITICAL FIX (YOUR PATH)
+            "sensor_database": "D:/CSE499_MK-2/OpenMVG/sensor_width_database/sensor_width_camera_database.txt",
+
+            # MATCHING / GEOMETRY
+            "geometric_model": "e",        # e = essential matrix (better default)
+            "guided_matching": True,
+
+            # FALLBACK IF DB FAILS
+            "fallback_focal_multiplier": 1.2
         }
     },
 
@@ -196,12 +211,13 @@ def load_config(user_config=None):
         _deep_update(config, user_config)
 
     _resolve_camera_model(config)
+    _validate_openmvg(config)
 
     return config
 
 
 # =====================================================
-# CAMERA MODEL LOGIC (UPDATED)
+# CAMERA MODEL RESOLUTION
 # =====================================================
 
 def _resolve_camera_model(config):
@@ -212,25 +228,43 @@ def _resolve_camera_model(config):
     dense_backend = backends["dense"]
     mesh_backend = backends["mesh"]
 
-    # Default: COLMAP best accuracy
     camera_model = "OPENCV"
 
-    # OpenMVS compatibility → MUST use PINHOLE
     if dense_backend == "openmvs" or mesh_backend in ["openmvs", "hybrid"]:
         camera_model = "PINHOLE"
 
-    # OpenMVG prefers PINHOLE (safer default)
     if sparse_backend == "openmvg":
         camera_model = "PINHOLE"
 
-    # Explicit override
     user_choice = pipeline.get("camera_model")
+
     if user_choice == "pinhole":
         camera_model = "PINHOLE"
     elif user_choice == "opencv":
         camera_model = "OPENCV"
 
     config["pipeline"]["camera_model"] = camera_model
+
+
+# =====================================================
+# 🔥 OPENMVG VALIDATION (NEW)
+# =====================================================
+
+def _validate_openmvg(config):
+    sparse_backend = config["pipeline"]["backends"]["sparse"]
+
+    if sparse_backend != "openmvg":
+        return
+
+    openmvg_cfg = config["sparse"]["openmvg"]
+    sensor_db = openmvg_cfg.get("sensor_database")
+
+    if sensor_db:
+        db_path = Path(sensor_db)
+        if not db_path.exists():
+            raise FileNotFoundError(
+                f"[OpenMVG] Sensor database not found: {sensor_db}"
+            )
 
 
 # =====================================================
