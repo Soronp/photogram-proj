@@ -1,7 +1,6 @@
 from pathlib import Path
 import open3d as o3d
 import numpy as np
-import struct
 
 
 # =====================================================
@@ -12,83 +11,24 @@ def _set_determinism():
 
 
 # =====================================================
-# CAMERA LOADING
-# =====================================================
-def _qvec_to_rotmat(qvec):
-    w, x, y, z = qvec
-    return np.array([
-        [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
-        [2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
-        [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y]
-    ])
-
-
-def _load_camera_centers(images_bin):
-    centers = []
-
-    with open(images_bin, "rb") as f:
-        num_images = struct.unpack("<Q", f.read(8))[0]
-
-        for _ in range(num_images):
-            f.read(4)
-
-            qvec = struct.unpack("<4d", f.read(32))
-            tvec = struct.unpack("<3d", f.read(24))
-
-            f.read(4)
-
-            while True:
-                if f.read(1) == b"\x00":
-                    break
-
-            num_points2D = struct.unpack("<Q", f.read(8))[0]
-            f.read(num_points2D * 24)
-
-            R = _qvec_to_rotmat(qvec)
-            t = np.array(tvec)
-
-            center = -R.T @ t
-            centers.append(center)
-
-    centers = np.array(centers)
-
-    # 🔥 CRITICAL FIX: VALIDATION
-    if centers.size == 0:
-        return None
-
-    if centers.ndim != 2 or centers.shape[1] != 3:
-        return None
-
-    # Remove NaN / Inf
-    mask = np.isfinite(centers).all(axis=1)
-    centers = centers[mask]
-
-    if len(centers) == 0:
-        return None
-
-    return centers
-
-
-# =====================================================
-# SCALE
+# SCALE ESTIMATION
 # =====================================================
 def _compute_scale(pcd):
     pts = np.asarray(pcd.points)
-    centroid = np.mean(pts, axis=0)
-    dists = np.linalg.norm(pts - centroid, axis=1)
+    center = pts.mean(axis=0)
+    dists = np.linalg.norm(pts - center, axis=1)
     return np.percentile(dists, 90)
 
 
 # =====================================================
-# NORMALS (ROBUST)
+# NORMALS (STABLE + GLOBAL)
 # =====================================================
-def _compute_normals(pcd, camera_centers, logger):
-    logger.info("mesh: computing stable normals")
+def _compute_normals(pcd, logger):
+    logger.info("mesh: computing normals")
 
     scale = _compute_scale(pcd)
-    radius = scale * 0.015
+    radius = max(scale * 0.02, 0.01)
 
-    # Step 1: Estimate
     pcd.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(
             radius=radius,
@@ -96,127 +36,77 @@ def _compute_normals(pcd, camera_centers, logger):
         )
     )
 
-    # Step 2: Local consistency
-    pcd.orient_normals_consistent_tangent_plane(200)
+    pcd.orient_normals_consistent_tangent_plane(100)
 
-    # -------------------------------------------------
-    # 🔥 SAFE CAMERA-BASED ORIENTATION
-    # -------------------------------------------------
-    if camera_centers is None or len(camera_centers) < 2:
-        logger.warning("mesh: camera centers invalid → fallback to Open3D orientation")
-        pcd.orient_normals_towards_camera_location(pcd.get_center())
-        return pcd
-
-    try:
-        cam_tree = o3d.geometry.KDTreeFlann(
-            o3d.utility.Vector3dVector(camera_centers)
-        )
-    except Exception as e:
-        logger.warning(f"mesh: KDTree build failed → {e}")
-        pcd.orient_normals_towards_camera_location(pcd.get_center())
-        return pcd
-
+    # Global orientation fix
     pts = np.asarray(pcd.points)
     normals = np.asarray(pcd.normals)
+    center = pts.mean(axis=0)
 
-    valid_count = 0
+    direction = pts - center
+    dot = np.einsum('ij,ij->i', direction, normals)
 
-    for i in range(len(pts)):
-        try:
-            p = pts[i]
-            n = normals[i]
-
-            k, idx, _ = cam_tree.search_knn_vector_3d(p, 1)
-
-            if k < 1:
-                continue
-
-            cam = camera_centers[idx[0]]
-            view_dir = p - cam
-
-            if np.dot(n, view_dir) < 0:
-                normals[i] *= -1
-
-            valid_count += 1
-
-        except Exception:
-            continue  # 🔥 NEVER CRASH
-
-    if valid_count == 0:
-        logger.warning("mesh: camera orientation failed → fallback")
-        pcd.orient_normals_towards_camera_location(pcd.get_center())
-    else:
-        logger.info(f"mesh: oriented {valid_count} points using cameras")
-
-    pcd.normals = o3d.utility.Vector3dVector(normals)
+    if np.mean(dot > 0) < 0.5:
+        logger.info("mesh: flipping normals")
+        pcd.normals = o3d.utility.Vector3dVector(-normals)
 
     return pcd
 
 
 # =====================================================
-# POISSON
+# POISSON (COMPLETENESS-FIRST)
 # =====================================================
 def _run_poisson(pcd, logger):
     pts = len(pcd.points)
 
-    depth = 11 if pts > 500_000 else 10
+    # Slightly higher depth for completeness
+    if pts < 300_000:
+        depth = 10
+    elif pts < 1_000_000:
+        depth = 11
+    elif pts < 3_000_000:
+        depth = 12
+    else:
+        depth = 13
+
     logger.info(f"mesh: poisson depth = {depth}")
 
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
         pcd,
         depth=depth,
-        scale=1.02,
-        linear_fit=True
+        scale=1.1,         # 🔥 EXPAND surface → fills gaps
+        linear_fit=False   # 🔥 more robust than True
     )
 
-    densities = np.asarray(densities)
-
-    thresh = np.quantile(densities, 0.05)
-    mesh.remove_vertices_by_mask(densities < thresh)
+    # ❌ NO density filtering → prevents holes
 
     return mesh
 
 
 # =====================================================
-# TRIM
+# CLEAN (SAFE ONLY)
 # =====================================================
-def _trim(mesh, pcd):
-    distances = pcd.compute_nearest_neighbor_distance()
-    avg_dist = np.mean(distances)
-
-    kdtree = o3d.geometry.KDTreeFlann(pcd)
-    verts = np.asarray(mesh.vertices)
-
-    keep = []
-    for i, v in enumerate(verts):
-        try:
-            k, _, d = kdtree.search_knn_vector_3d(v, 1)
-            if k > 0 and d[0] < avg_dist * 1.5:
-                keep.append(i)
-        except Exception:
-            continue
-
-    mesh = mesh.select_by_index(keep)
-    mesh.remove_unreferenced_vertices()
-
-    return mesh
-
-
-# =====================================================
-# CLEAN
-# =====================================================
-def _clean(mesh):
-    clusters, counts, _ = mesh.cluster_connected_triangles()
-    counts = np.array(counts)
-
-    keep = counts > (0.05 * counts.max())
-    mask = [not keep[c] for c in clusters]
-
-    mesh.remove_triangles_by_mask(mask)
-    mesh.remove_unreferenced_vertices()
+def _clean(mesh, logger):
+    logger.info("mesh: cleaning")
 
     mesh.remove_degenerate_triangles()
+    mesh.remove_duplicated_triangles()
+    mesh.remove_duplicated_vertices()
     mesh.remove_non_manifold_edges()
+
+    return mesh
+
+
+# =====================================================
+# OPTIONAL: LIGHT HOLE FILLING
+# =====================================================
+def _fill_holes(mesh, logger):
+    logger.info("mesh: light smoothing (hole reduction)")
+
+    # VERY light smoothing → helps fill micro gaps
+    mesh = mesh.filter_smooth_laplacian(
+        number_of_iterations=2
+    )
 
     return mesh
 
@@ -227,35 +117,48 @@ def _clean(mesh):
 def run(paths, config, logger):
     _set_determinism()
 
-    logger.info("---- MESH_RECONSTRUCTION (ROBUST FIXED) ----")
+    logger.info("---- MESH_RECONSTRUCTION (COMPLETENESS MODE) ----")
 
+    # -------------------------------------------------
+    # LOAD (USE BEST FUSED FILE)
+    # -------------------------------------------------
     if not paths.fused.exists():
         raise RuntimeError("fused.ply missing")
-
-    images_bin = paths.dense / "sparse" / "images.bin"
-    if not images_bin.exists():
-        raise RuntimeError("images.bin required")
 
     pcd = o3d.io.read_point_cloud(str(paths.fused))
 
     if len(pcd.points) < 5000:
         raise RuntimeError("insufficient points")
 
-    if len(pcd.points) > 1_500_000:
-        pcd = pcd.voxel_down_sample(0.003)
+    logger.info(f"mesh: input points = {len(pcd.points)}")
 
-    pcd, _ = pcd.remove_statistical_outlier(20, 2.5)
+    # ❌ NO PRE-CLEAN → preserve full geometry
 
-    camera_centers = _load_camera_centers(images_bin)
+    # -------------------------------------------------
+    # NORMALS
+    # -------------------------------------------------
+    pcd = _compute_normals(pcd, logger)
 
-    pcd = _compute_normals(pcd, camera_centers, logger)
-
+    # -------------------------------------------------
+    # POISSON
+    # -------------------------------------------------
     mesh = _run_poisson(pcd, logger)
-    mesh = _trim(mesh, pcd)
-    mesh = _clean(mesh)
+
+    # -------------------------------------------------
+    # CLEAN
+    # -------------------------------------------------
+    mesh = _clean(mesh, logger)
+
+    # -------------------------------------------------
+    # LIGHT HOLE FIX
+    # -------------------------------------------------
+    mesh = _fill_holes(mesh, logger)
 
     mesh.compute_vertex_normals()
 
+    # -------------------------------------------------
+    # SAVE
+    # -------------------------------------------------
     o3d.io.write_triangle_mesh(str(paths.mesh_file), mesh)
 
     logger.info(f"mesh: SUCCESS → {paths.mesh_file}")

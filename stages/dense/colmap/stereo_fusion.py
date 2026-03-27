@@ -4,192 +4,211 @@ import numpy as np
 
 
 # =====================================================
-# RUN FUSION
+# VALIDATE DENSE WORKSPACE
 # =====================================================
-def _run_fusion(tool_runner, dense_dir, out, p):
-    tool_runner.run([
+def _validate_dense_workspace(dense: Path):
+    stereo = dense / "stereo"
+    depth = stereo / "depth_maps"
+    normal = stereo / "normal_maps"
+
+    return depth.exists() and normal.exists()
+
+
+# =====================================================
+# PARAM BUILDER (HIGH DENSITY, NOT DESTRUCTIVE)
+# =====================================================
+def _build_params(num_images):
+    """
+    Goal:
+    - maximize point count
+    - keep structure stable
+    - avoid over-pruning
+    """
+
+    if num_images < 40:
+        max_pixels = 20000
+    elif num_images < 100:
+        max_pixels = 30000
+    else:
+        max_pixels = 40000
+
+    return {
+        "max_image_size": -1,
+
+        # 🔥 CRITICAL: allow more growth
+        "min_num_pixels": 2,
+        "max_num_pixels": max_pixels,
+
+        # 🔥 RELAXED (keeps surfaces alive)
+        "max_reproj_error": 3.0,
+        "max_depth_error": 0.02,
+        "max_normal_error": 25,
+
+        "max_traversal_depth": 150,
+
+        # 🔥 HUGE IMPACT (default=50 is TOO STRICT)
+        "check_num_images": 3,
+
+        "cache_size": 64,
+        "use_cache": 1,
+    }
+
+
+# =====================================================
+# BUILD COMMAND (STRICTLY MATCH CLI)
+# =====================================================
+def _build_cmd(dense_dir, out_path, p):
+    return [
         "colmap", "stereo_fusion",
+
         "--workspace_path", str(dense_dir),
         "--workspace_format", "COLMAP",
-        "--input_type", "geometric",
-        "--output_path", str(out),
 
-        "--StereoFusion.min_num_pixels", str(p["min_pixels"]),
-        "--StereoFusion.max_reproj_error", str(p["max_reproj"]),
-        "--StereoFusion.max_depth_error", str(p["max_depth"]),
-        "--StereoFusion.max_normal_error", str(p["max_normal"]),
-        "--StereoFusion.max_traversal_depth", str(p["traversal"]),
-        "--StereoFusion.num_threads", "1",
-    ])
+        "--input_type", "geometric",
+        "--output_type", "PLY",
+        "--output_path", str(out_path),
+
+        "--StereoFusion.max_image_size", str(p["max_image_size"]),
+
+        "--StereoFusion.min_num_pixels", str(p["min_num_pixels"]),
+        "--StereoFusion.max_num_pixels", str(p["max_num_pixels"]),
+
+        "--StereoFusion.max_traversal_depth",
+        str(p["max_traversal_depth"]),
+
+        "--StereoFusion.max_reproj_error",
+        str(p["max_reproj_error"]),
+
+        "--StereoFusion.max_depth_error",
+        str(p["max_depth_error"]),
+
+        "--StereoFusion.max_normal_error",
+        str(p["max_normal_error"]),
+
+        "--StereoFusion.check_num_images",
+        str(p["check_num_images"]),
+
+        "--StereoFusion.cache_size",
+        str(p["cache_size"]),
+
+        "--StereoFusion.use_cache",
+        str(p["use_cache"]),
+    ]
 
 
 # =====================================================
 # LOAD POINT CLOUD
 # =====================================================
-def _load(path):
+def _load_pcd(path):
+    if not path.exists():
+        return None
+
     pcd = o3d.io.read_point_cloud(str(path))
-    return pcd if len(pcd.points) > 0 else None
+    if len(pcd.points) == 0:
+        return None
+
+    return pcd
 
 
 # =====================================================
-# SAFE POST-PROCESS (NON-DESTRUCTIVE)
+# LIGHT POST PROCESS (NON-DESTRUCTIVE)
 # =====================================================
-def _safe_post(pcd):
+def _post_process(pcd):
     if pcd is None:
         return None
 
-    original_count = len(pcd.points)
+    pts = np.asarray(pcd.points)
 
-    # VERY light denoise only
-    filtered, ind = pcd.remove_statistical_outlier(
+    # --- only downsample if EXTREMELY large
+    if len(pts) > 1_000_000:
+        pcd = pcd.voxel_down_sample(voxel_size=0.005)
+
+    # --- VERY light cleanup (keep density)
+    filtered, _ = pcd.remove_statistical_outlier(
         nb_neighbors=8,
         std_ratio=3.0
     )
 
-    # If we removed too many points → reject
-    if len(filtered.points) < 0.85 * original_count:
-        return pcd  # keep original
+    # keep if not destructive
+    if len(filtered.points) > 0.85 * len(pcd.points):
+        pcd = filtered
 
-    filtered.estimate_normals()
-    return filtered
-
-
-# =====================================================
-# QUALITY METRIC
-# =====================================================
-def _evaluate(pcd):
-    if pcd is None or len(pcd.points) == 0:
-        return 0.0
-
-    pts = np.asarray(pcd.points)
-
-    bbox = pts.max(axis=0) - pts.min(axis=0)
-    volume = np.prod(bbox) if np.all(bbox > 0) else 1
-
-    density = len(pts) / volume
-
-    return min(100, density * 0.05)
-
-
-# =====================================================
-# PARAM POLICY (KEEP STRICT BY DEFAULT)
-# =====================================================
-def _build_params(retry):
-    if retry == 0:
-        return {
-            "min_pixels": 3,
-            "max_reproj": 2.0,
-            "max_depth": 0.02,
-            "max_normal": 18,
-            "traversal": 80,
-        }
-    elif retry == 1:
-        return {
-            "min_pixels": 2,
-            "max_reproj": 2.5,
-            "max_depth": 0.025,
-            "max_normal": 22,
-            "traversal": 100,
-        }
-    else:
-        return {
-            "min_pixels": 2,
-            "max_reproj": 3.0,
-            "max_depth": 0.03,
-            "max_normal": 25,
-            "traversal": 120,
-        }
+    return pcd
 
 
 # =====================================================
 # MAIN
 # =====================================================
 def run(paths, config, logger, tool_runner):
-    stage = "stereo_fusion_correct"
+    stage = "stereo_fusion_single_pass"
     logger.info(f"==== {stage.upper()} ====")
 
-    dense = paths.dense
-    retry = config.get("_meta", {}).get("retry_count", 0)
+    dense_dir = paths.dense
 
-    params = _build_params(retry)
+    # -------------------------------------------------
+    # VALIDATION
+    # -------------------------------------------------
+    if not _validate_dense_workspace(dense_dir):
+        raise RuntimeError(
+            "Dense workspace invalid → run patch_match_stereo first"
+        )
 
-    raw_path = dense / "fused_raw.ply"
+    # -------------------------------------------------
+    # DATASET SIZE
+    # -------------------------------------------------
+    num_images = len(list(paths.images.glob("*")))
+    logger.info(f"Images detected: {num_images}")
 
-    logger.info(
-        f"Fusion → pixels={params['min_pixels']} | "
-        f"reproj={params['max_reproj']} | "
-        f"depth={params['max_depth']}"
-    )
+    # -------------------------------------------------
+    # PARAM BUILD
+    # -------------------------------------------------
+    params = _build_params(num_images)
+    logger.info(f"Params: {params}")
 
     # -------------------------------------------------
     # RUN FUSION
     # -------------------------------------------------
-    _run_fusion(tool_runner, dense, raw_path, params)
+    out_path = dense_dir / "fused.ply"
 
-    raw_pcd = _load(raw_path)
-    raw_score = _evaluate(raw_pcd)
+    cmd = _build_cmd(dense_dir, out_path, params)
 
-    # -------------------------------------------------
-    # SAFE POST PROCESS
-    # -------------------------------------------------
-    processed_pcd = _safe_post(raw_pcd)
-    processed_score = _evaluate(processed_pcd)
+    tool_runner.run(cmd, stage=stage)
 
     # -------------------------------------------------
-    # SELECT BEST VERSION
+    # LOAD RESULT
     # -------------------------------------------------
-    if processed_score >= raw_score:
-        final_pcd = processed_pcd
-        final_score = processed_score
-        logger.info("Using processed point cloud")
-    else:
-        final_pcd = raw_pcd
-        final_score = raw_score
-        logger.info("Using raw point cloud (better geometry preserved)")
+    pcd = _load_pcd(out_path)
+
+    if pcd is None:
+        raise RuntimeError("Fusion failed → empty output")
+
+    logger.info(f"Raw points: {len(pcd.points)}")
 
     # -------------------------------------------------
-    # OPTIONAL RETRY (ONLY IF VERY LOW)
+    # POST PROCESS
     # -------------------------------------------------
-    if final_score < 40:
-        logger.warning("Low fusion quality → retrying relaxed fusion")
+    pcd = _post_process(pcd)
 
-        retry_params = _build_params(retry + 1)
-        retry_path = dense / "fused_retry.ply"
-
-        _run_fusion(tool_runner, dense, retry_path, retry_params)
-
-        retry_pcd = _load(retry_path)
-        retry_score = _evaluate(retry_pcd)
-
-        if retry_score > final_score:
-            final_pcd = retry_pcd
-            final_score = retry_score
-            logger.info("Retry improved result")
+    logger.info(f"Final points: {len(pcd.points)}")
 
     # -------------------------------------------------
     # SAVE FINAL
     # -------------------------------------------------
-    final_path = dense / "fused.ply"
-    o3d.io.write_point_cloud(str(final_path), final_pcd)
+    final_path = dense_dir / "fused_final.ply"
+    o3d.io.write_point_cloud(str(final_path), pcd)
 
-    # -------------------------------------------------
-    # OUTPUT
-    # -------------------------------------------------
-    print("\n=== FUSION QUALITY SCORE ===")
-    print(f"Point Density Score: {final_score:.2f}%")
+    print("\n=== FUSION RESULT ===")
+    print(f"Points: {len(pcd.points)}")
 
-    if final_score > 70:
+    if len(pcd.points) > 500000:
         print("Quality: HIGH")
-    elif final_score > 45:
+    elif len(pcd.points) > 100000:
         print("Quality: MEDIUM")
     else:
         print("Quality: LOW")
 
-    logger.info(f"Final points: {len(final_pcd.points)}")
-
     return {
-        "status": "fusion_complete",
-        "quality_score": final_score,
-        "points": len(final_pcd.points),
-        "used_raw": final_pcd is raw_pcd
+        "status": "complete",
+        "points": len(pcd.points),
+        "images": num_images
     }

@@ -11,44 +11,45 @@ def _validate_model(model_path: Path):
 
 
 # =====================================================
-# PARAMETER ADAPTATION (CORE LOGIC)
+# PARAMETER ADAPTATION (SAFE)
 # =====================================================
-def _get_adaptive_params(retry: int):
+def _get_params(retry: int):
     """
-    Returns mapper parameters adapted for retries.
-    Focus: maximize coverage while maintaining stability.
+    Geometry-safe parameter adaptation.
     """
 
     params = {
-        "init_inliers": 40,
+        # Initialization (closer to COLMAP defaults)
+        "init_inliers": 100,
+        "init_tri_angle": 16,
+        "init_max_error": 4,
+
+        # Pose
         "abs_inliers": 30,
         "abs_ratio": 0.25,
-        "tri_angle": 1.0,
-        "tri_reproj": 6.0,
-        "filter_reproj": 4.5,
+
+        # Triangulation (CRITICAL)
+        "tri_angle": 1.5,
+        "tri_reproj": 4.0,
+        "filter_reproj": 4.0,
     }
 
     if retry > 0:
-        # 🔥 Controlled relaxation (NOT explosion)
-        params["init_inliers"] = max(20, params["init_inliers"] - 10 * retry)
-        params["abs_inliers"] = max(15, params["abs_inliers"] - 5 * retry)
+        # VERY controlled relaxation
+        params["init_inliers"] = max(60, params["init_inliers"] - 20 * retry)
+        params["abs_inliers"] = max(20, params["abs_inliers"] - 5 * retry)
 
-        params["abs_ratio"] = max(0.15, params["abs_ratio"] - 0.05 * retry)
-
-        params["tri_angle"] = max(0.6, params["tri_angle"] - 0.2 * retry)
-        params["tri_reproj"] = min(9.0, params["tri_reproj"] + 1.0 * retry)
-
-        params["filter_reproj"] = min(6.0, params["filter_reproj"] + 0.5 * retry)
+        params["tri_angle"] = max(1.2, params["tri_angle"] - 0.1 * retry)
+        params["tri_reproj"] = min(6.0, params["tri_reproj"] + 0.5 * retry)
+        params["filter_reproj"] = min(5.0, params["filter_reproj"] + 0.5 * retry)
 
     return params
 
 
 # =====================================================
-# COLMAP COMMAND BUILDER
+# COLMAP COMMAND (FULLY CORRECT)
 # =====================================================
-def _build_colmap_cmd(database_path, image_dir, sparse_root, params, use_gpu=True):
-    gpu_flag = "1" if use_gpu else "0"
-    gpu_index = "0" if use_gpu else "-1"
+def _build_colmap_cmd(database_path, image_dir, sparse_root, p, use_gpu=True):
 
     return [
         "colmap", "mapper",
@@ -60,57 +61,62 @@ def _build_colmap_cmd(database_path, image_dir, sparse_root, params, use_gpu=Tru
         # Threading
         "--Mapper.num_threads", "-1",
 
-        # Model control
-        "--Mapper.multiple_models", "0",   # 🔥 force single global model
+        # SINGLE MODEL (important)
+        "--Mapper.multiple_models", "0",
         "--Mapper.max_num_models", "1",
-        "--Mapper.min_model_size", "8",
+        "--Mapper.min_model_size", "10",
 
-        # Initialization
-        "--Mapper.init_min_num_inliers", str(params["init_inliers"]),
-        "--Mapper.init_max_reg_trials", "8",
-        "--Mapper.init_num_trials", "500",
+        # -------------------------
+        # INITIALIZATION (FIXED)
+        # -------------------------
+        "--Mapper.init_min_num_inliers", str(p["init_inliers"]),
+        "--Mapper.init_max_error", str(p["init_max_error"]),
+        "--Mapper.init_min_tri_angle", str(p["init_tri_angle"]),
+        "--Mapper.init_max_reg_trials", "4",
+        "--Mapper.init_num_trials", "300",
 
-        # Pose estimation (CRITICAL)
-        "--Mapper.abs_pose_min_num_inliers", str(params["abs_inliers"]),
-        "--Mapper.abs_pose_min_inlier_ratio", str(params["abs_ratio"]),
+        # -------------------------
+        # POSE
+        # -------------------------
+        "--Mapper.abs_pose_min_num_inliers", str(p["abs_inliers"]),
+        "--Mapper.abs_pose_min_inlier_ratio", str(p["abs_ratio"]),
         "--Mapper.abs_pose_max_error", "12",
 
-        # 🔥 Triangulation (KEY FOR FULL OBJECT)
-        "--Mapper.tri_min_angle", str(params["tri_angle"]),
-        "--Mapper.tri_complete_max_reproj_error", str(params["tri_reproj"]),
-        "--Mapper.tri_merge_max_reproj_error", str(params["tri_reproj"]),
-        "--Mapper.tri_continue_max_angle_error", "4",
+        # -------------------------
+        # TRIANGULATION (CRITICAL FIX)
+        # -------------------------
+        "--Mapper.tri_min_angle", str(p["tri_angle"]),
+        "--Mapper.tri_complete_max_reproj_error", str(p["tri_reproj"]),
+        "--Mapper.tri_merge_max_reproj_error", str(p["tri_reproj"]),
+        "--Mapper.tri_create_max_angle_error", "2",
+        "--Mapper.tri_continue_max_angle_error", "2",
 
-        # 🔥 KEEP ALL TRACKS (CRITICAL FIX)
+        # KEEP TRACKS
         "--Mapper.tri_ignore_two_view_tracks", "0",
 
-        # 🔥 Prevent over-pruning
-        "--Mapper.filter_max_reproj_error", str(params["filter_reproj"]),
+        # FILTERING
+        "--Mapper.filter_max_reproj_error", str(p["filter_reproj"]),
+        "--Mapper.filter_min_tri_angle", "1.5",
 
-        # 🔥 Improve completeness
+        # -------------------------
+        # BUNDLE ADJUSTMENT
+        # -------------------------
         "--Mapper.ba_refine_focal_length", "1",
         "--Mapper.ba_refine_principal_point", "0",
         "--Mapper.ba_refine_extra_params", "1",
 
-        # Bundle Adjustment
         "--Mapper.ba_local_max_num_iterations", "25",
-        "--Mapper.ba_global_max_num_iterations", "60",
+        "--Mapper.ba_global_max_num_iterations", "50",
 
-        "--Mapper.ba_use_gpu", gpu_flag,
-        "--Mapper.ba_gpu_index", gpu_index,
+        "--Mapper.ba_use_gpu", "1" if use_gpu else "0",
+        "--Mapper.ba_gpu_index", "0" if use_gpu else "-1",
     ]
 
 
 # =====================================================
-# GLOMAP COMMAND BUILDER
+# GLOMAP COMMAND (FIXED SCALE)
 # =====================================================
 def _build_glomap_cmd(database_path, image_dir, sparse_root, retry, use_gpu=True):
-    gpu_flag = "1" if use_gpu else "0"
-    gpu_index = "0" if use_gpu else "-1"
-
-    # Slight adaptation for retry
-    min_tracks = 30 if retry == 0 else 20
-    min_views = 3 if retry == 0 else 2
 
     return [
         "glomap", "mapper",
@@ -121,33 +127,42 @@ def _build_glomap_cmd(database_path, image_dir, sparse_root, retry, use_gpu=True
 
         "--constraint_type", "POINTS_AND_CAMERAS",
 
-        "--ba_iteration_num", "5",
-        "--retriangulation_iteration_num", "3",
+        "--ba_iteration_num", "3",
+        "--retriangulation_iteration_num", "2",
 
         "--RelPoseEstimation.max_epipolar_error", "1",
 
-        "--TrackEstablishment.min_num_tracks_per_view", str(min_tracks),
-        "--TrackEstablishment.min_num_view_per_track", str(min_views),
+        "--TrackEstablishment.min_num_tracks_per_view",
+        str(30 if retry == 0 else 20),
 
-        "--GlobalPositioning.use_gpu", gpu_flag,
-        "--GlobalPositioning.gpu_index", gpu_index,
+        "--TrackEstablishment.min_num_view_per_track",
+        str(3 if retry == 0 else 2),
 
-        "--BundleAdjustment.use_gpu", gpu_flag,
-        "--BundleAdjustment.gpu_index", gpu_index,
+        # GPU
+        "--GlobalPositioning.use_gpu", "1" if use_gpu else "0",
+        "--GlobalPositioning.gpu_index", "0" if use_gpu else "-1",
 
-        # 🔥 Relaxed triangulation
-        "--Triangulation.min_angle", "0.8",
-        "--Triangulation.complete_max_reproj_error", "12",
-        "--Triangulation.merge_max_reproj_error", "12",
+        "--BundleAdjustment.use_gpu", "1" if use_gpu else "0",
+        "--BundleAdjustment.gpu_index", "0" if use_gpu else "-1",
 
-        "--Thresholds.min_inlier_num", "20",
-        "--Thresholds.min_inlier_ratio", "0.2",
-        "--Thresholds.max_reprojection_error", "6",
+        # -------------------------
+        # TRIANGULATION (FIXED)
+        # -------------------------
+        "--Triangulation.min_angle", "1.0",
+        "--Triangulation.complete_max_reproj_error", "15",
+        "--Triangulation.merge_max_reproj_error", "15",
+
+        # -------------------------
+        # THRESHOLDS (CRITICAL FIX)
+        # -------------------------
+        "--Thresholds.min_inlier_num", "30",
+        "--Thresholds.min_inlier_ratio", "0.25",
+        "--Thresholds.max_reprojection_error", "0.01",  # 🔥 FIXED
     ]
 
 
 # =====================================================
-# MAIN ENTRY
+# MAIN
 # =====================================================
 def run(paths, config, logger, tool_runner):
 
@@ -161,38 +176,25 @@ def run(paths, config, logger, tool_runner):
     sparse_root.mkdir(parents=True, exist_ok=True)
 
     if not database_path.exists():
-        raise RuntimeError(f"{stage}: database missing")
+        raise RuntimeError("database missing")
 
-    # =====================================================
-    # CLEAN PREVIOUS MODELS
-    # =====================================================
-    logger.info(f"{stage}: clearing previous models")
-
+    # =================================================
+    # CLEAN
+    # =================================================
     for item in sparse_root.iterdir():
         if item.is_dir():
             shutil.rmtree(item)
 
-    backend = config.get("sparse", {}).get("backend", "colmap")
+    backend = config["pipeline"]["backends"]["sparse"]
     retry = config.get("_meta", {}).get("retry_count", 0)
 
     logger.info(f"{stage}: backend={backend}, retry={retry}")
 
-    # =====================================================
-    # PARAMETER ADAPTATION
-    # =====================================================
-    params = _get_adaptive_params(retry)
+    params = _get_params(retry)
 
-    logger.info(
-        f"{stage}: params | "
-        f"init={params['init_inliers']} "
-        f"abs={params['abs_inliers']} "
-        f"angle={params['tri_angle']} "
-        f"reproj={params['tri_reproj']}"
-    )
-
-    # =====================================================
-    # EXECUTION
-    # =====================================================
+    # =================================================
+    # RUN
+    # =================================================
     try:
         if backend == "glomap":
             cmd = _build_glomap_cmd(database_path, image_dir, sparse_root, retry, True)
@@ -211,27 +213,23 @@ def run(paths, config, logger, tool_runner):
             cmd = _build_colmap_cmd(database_path, image_dir, sparse_root, params, False)
             tool_runner.run(cmd, stage=stage + "_colmap_cpu")
 
-    # =====================================================
-    # VALIDATION
-    # =====================================================
+    # =================================================
+    # VALIDATE
+    # =================================================
     models = [p for p in sparse_root.iterdir() if p.is_dir()]
     valid_models = [m for m in models if _validate_model(m)]
 
     if not valid_models:
-        raise RuntimeError(f"{stage}: no valid models produced")
+        raise RuntimeError("no valid models")
 
-    # 🔥 BEST MODEL SELECTION (robust)
     best_model = max(
         valid_models,
         key=lambda m: (m / "points3D.bin").stat().st_size
     )
 
-    logger.info(f"{stage}: selected model → {best_model.name}")
-
-    # 🔥 CRITICAL: enforce canonical path
     if best_model != paths.sparse_model:
         if paths.sparse_model.exists():
             shutil.rmtree(paths.sparse_model)
         shutil.copytree(best_model, paths.sparse_model)
 
-    logger.info(f"{stage}: SUCCESS")
+    logger.info(f"{stage}: SUCCESS → {best_model.name}")

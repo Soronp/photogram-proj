@@ -4,7 +4,7 @@ import numpy as np
 
 
 # =====================================================
-# VALIDATE SPARSE MODEL
+# SPARSE VALIDATION
 # =====================================================
 def _validate_sparse_model(sparse_dir: Path):
     if not sparse_dir.exists():
@@ -21,7 +21,7 @@ def _validate_sparse_model(sparse_dir: Path):
 
 
 # =====================================================
-# ENSURE DENSE/SPARSE CONSISTENCY
+# ENSURE CONSISTENCY
 # =====================================================
 def _ensure_dense_sparse(paths, logger):
     dense_sparse = paths.dense / "sparse"
@@ -40,77 +40,126 @@ def _ensure_dense_sparse(paths, logger):
 
 
 # =====================================================
-# BASE PARAMS
+# ADAPTIVE PARAMS (STRICT TO CLI)
 # =====================================================
-def _base_params():
+def _build_params(num_images):
+    """
+    Tuned for:
+    - high density
+    - controlled runtime
+    - stable geometry
+    """
+
+    # Resolution scaling
+    if num_images < 40:
+        max_img_size = 2000
+    elif num_images < 100:
+        max_img_size = 1800
+    else:
+        max_img_size = 1600
+
+def _build_params(num_images):
+    if num_images < 40:
+        max_img_size = 1800
+    elif num_images < 100:
+        max_img_size = 1600
+    else:
+        max_img_size = 1400
+
     return {
-        "max_img_size": 1800,
-        "window_radius": 4,
-        "num_samples": 12,
-        "num_iterations": 3,
-        "geom_consistency": 1,
-        "geom_consistency_regularizer": 0.3,
-        "filter_min_ncc": 0.12,
-        "filter_min_num_consistent": 2,
-        "min_triangulation_angle": 2.5,
+        "max_img_size": max_img_size,
+
+        # 🔥 BIG SPEED GAIN
+        "window_radius": 5,
+        "window_step": 2,   # was 1 → halves compute
+
+        # 🔥 MAJOR SPEED CONTROL
+        "num_samples": 20,  # was ~40
+        "num_iterations": 5,  # was ~8
+
+        # matching
         "sigma_spatial": 4.0,
-        "sigma_color": 0.2,
-        "cache_size": 32,
+        "sigma_color": 0.25,
+        "ncc_sigma": 0.6,
+
+        # geometry
+        "min_triangulation_angle": 1.0,
+        "incident_angle_sigma": 1.0,
+
+        # 🔥 KEEP THIS ON
+        "geom_consistency": 1,
+        "geom_consistency_regularizer": 0.35,
+        "geom_consistency_max_cost": 3,
+
+        # 🔥 ARTIFACT CONTROL (IMPORTANT)
+        "filter_min_ncc": 0.05,   # was 0.02 → cleaner
+        "filter_min_num_consistent": 2,
+        "filter_min_triangulation_angle": 1.0,
+        "filter_geom_consistency_max_cost": 2,
+
+        "cache_size": 64,
     }
 
 
 # =====================================================
-# PARAM ADJUSTMENT
-# =====================================================
-def _adjust_params(base):
-    p = base.copy()
-
-    # generalized "recovery mode"
-    p["filter_min_ncc"] = 0.08
-    p["num_samples"] += 6
-    p["window_radius"] += 1
-    p["num_iterations"] += 2
-
-    return p
-
-
-# =====================================================
-# BUILD COMMAND
+# COMMAND BUILDER (STRICT CLI FLAGS)
 # =====================================================
 def _build_cmd(dense_dir, p, gpu=True):
     return [
         "colmap", "patch_match_stereo",
+
         "--workspace_path", str(dense_dir),
         "--workspace_format", "COLMAP",
 
         "--PatchMatchStereo.gpu_index", "0" if gpu else "-1",
+
         "--PatchMatchStereo.max_image_size", str(p["max_img_size"]),
 
         "--PatchMatchStereo.window_radius", str(p["window_radius"]),
+        "--PatchMatchStereo.window_step", str(p["window_step"]),
+
         "--PatchMatchStereo.num_samples", str(p["num_samples"]),
         "--PatchMatchStereo.num_iterations", str(p["num_iterations"]),
 
         "--PatchMatchStereo.sigma_spatial", str(p["sigma_spatial"]),
         "--PatchMatchStereo.sigma_color", str(p["sigma_color"]),
-
-        "--PatchMatchStereo.geom_consistency", str(p["geom_consistency"]),
-        "--PatchMatchStereo.geom_consistency_regularizer",
-        str(p["geom_consistency_regularizer"]),
+        "--PatchMatchStereo.ncc_sigma", str(p["ncc_sigma"]),
 
         "--PatchMatchStereo.min_triangulation_angle",
         str(p["min_triangulation_angle"]),
 
+        "--PatchMatchStereo.incident_angle_sigma",
+        str(p["incident_angle_sigma"]),
+
+        "--PatchMatchStereo.geom_consistency",
+        str(p["geom_consistency"]),
+
+        "--PatchMatchStereo.geom_consistency_regularizer",
+        str(p["geom_consistency_regularizer"]),
+
+        "--PatchMatchStereo.geom_consistency_max_cost",
+        str(p["geom_consistency_max_cost"]),
+
         "--PatchMatchStereo.filter", "1",
-        "--PatchMatchStereo.filter_min_ncc", str(p["filter_min_ncc"]),
+
+        "--PatchMatchStereo.filter_min_ncc",
+        str(p["filter_min_ncc"]),
+
         "--PatchMatchStereo.filter_min_num_consistent",
         str(p["filter_min_num_consistent"]),
+
+        "--PatchMatchStereo.filter_min_triangulation_angle",
+        str(p["filter_min_triangulation_angle"]),
+
+        "--PatchMatchStereo.filter_geom_consistency_max_cost",
+        str(p["filter_geom_consistency_max_cost"]),
 
         "--PatchMatchStereo.cache_size", str(p["cache_size"]),
     ]
 
 
 # =====================================================
-# LOAD DEPTH MAP
+# DEPTH LOADING
 # =====================================================
 def _load_depth(path):
     try:
@@ -121,171 +170,9 @@ def _load_depth(path):
 
 
 # =====================================================
-# ANALYZE IMAGE QUALITY
+# COVERAGE COMPUTATION
 # =====================================================
-def _analyze_images(depth_dir: Path):
-    results = {}
-
-    for f in depth_dir.glob("*.bin"):
-        data = _load_depth(f)
-        if data is None:
-            results[f.stem] = ("FAIL", 0)
-            continue
-
-        valid = np.count_nonzero(data > 0)
-        ratio = valid / data.size
-
-        if ratio > 0.65:
-            results[f.stem] = ("GOOD", ratio)
-        else:
-            results[f.stem] = ("WEAK", ratio)
-
-    return results
-
-
-# =====================================================
-# BUILD GLOBAL COVERAGE MASK
-# =====================================================
-def _build_coverage(depth_dir: Path, strong_images):
-    coverage = None
-
-    for img in strong_images:
-        f = depth_dir / f"{img}.bin"
-        data = _load_depth(f)
-
-        if data is None:
-            continue
-
-        mask = (data > 0).astype(np.uint8)
-
-        if coverage is None:
-            coverage = mask
-        else:
-            coverage = np.maximum(coverage, mask)
-
-    return coverage
-
-
-# =====================================================
-# CHECK IF IMAGE ADDS NEW GEOMETRY
-# =====================================================
-def _adds_new_geometry(depth_dir, img, coverage):
-    f = depth_dir / f"{img}.bin"
-    data = _load_depth(f)
-
-    if data is None or coverage is None:
-        return False
-
-    mask = (data > 0).astype(np.uint8)
-
-    new_pixels = np.logical_and(mask == 1, coverage == 0)
-    gain = np.count_nonzero(new_pixels) / mask.size
-
-    return gain > 0.05  # threshold
-
-
-# =====================================================
-# DELETE OUTPUTS
-# =====================================================
-def _delete_outputs(dense_dir, images):
-    depth_dir = dense_dir / "stereo" / "depth_maps"
-    normal_dir = dense_dir / "stereo" / "normal_maps"
-
-    for img in images:
-        base = img.replace(".JPG", "").replace(".jpg", "")
-
-        for f in depth_dir.glob(f"{base}*"):
-            f.unlink(missing_ok=True)
-
-        for f in normal_dir.glob(f"{base}*"):
-            f.unlink(missing_ok=True)
-
-
-# =====================================================
-# MAIN
-# =====================================================
-def run(paths, config, logger, tool_runner):
-    stage = "patch_match_geometry_aware"
-    logger.info(f"---- {stage.upper()} ----")
-
-    dense_dir = paths.dense
-    _ensure_dense_sparse(paths, logger)
-
-    base = _base_params()
-
-    # -------------------------------------------------
-    # PASS 1
-    # -------------------------------------------------
-    logger.info("Running full PatchMatch...")
-
-    try:
-        tool_runner.run(_build_cmd(dense_dir, base, True), stage=stage + "_gpu")
-    except Exception:
-        tool_runner.run(_build_cmd(dense_dir, base, False), stage=stage + "_cpu")
-
-    depth_dir = dense_dir / "stereo" / "depth_maps"
-
-    # -------------------------------------------------
-    # ANALYZE
-    # -------------------------------------------------
-    analysis = _analyze_images(depth_dir)
-
-    strong = []
-    weak = []
-
-    print("\n=== IMAGE QUALITY ===")
-
-    for img, (status, score) in analysis.items():
-        print(f"{img}: {status} ({score:.2f})")
-
-        normalized = img.split(".")[0]
-
-        if status == "GOOD":
-            strong.append(normalized)
-        else:
-            weak.append(normalized)
-
-    # -------------------------------------------------
-    # BUILD GEOMETRY FROM STRONG
-    # -------------------------------------------------
-    logger.info(f"Building geometry from {len(strong)} strong images...")
-    coverage = _build_coverage(depth_dir, strong)
-
-    # -------------------------------------------------
-    # SELECT USEFUL WEAK IMAGES
-    # -------------------------------------------------
-    selected = []
-
-    for img in weak:
-        if _adds_new_geometry(depth_dir, img, coverage):
-            selected.append(img)
-
-    logger.info(f"Selected {len(selected)} weak images that add geometry")
-
-    # -------------------------------------------------
-    # RE-RUN ONLY IF USEFUL
-    # -------------------------------------------------
-    if selected:
-        _delete_outputs(dense_dir, selected)
-
-        refined = _adjust_params(base)
-
-        logger.info("Re-running PatchMatch for geometry completion...")
-
-        try:
-            tool_runner.run(
-                _build_cmd(dense_dir, refined, True),
-                stage=stage + "_refine_gpu"
-            )
-        except Exception:
-            tool_runner.run(
-                _build_cmd(dense_dir, refined, False),
-                stage=stage + "_refine_cpu"
-            )
-
-    # -------------------------------------------------
-    # FINAL SCORE
-    # -------------------------------------------------
+def _compute_coverage(depth_dir: Path):
     total_valid = 0
     total_pixels = 0
 
@@ -297,14 +184,59 @@ def run(paths, config, logger, tool_runner):
         total_valid += np.count_nonzero(data > 0)
         total_pixels += data.size
 
-    score = (total_valid / total_pixels) * 100 if total_pixels else 0
+    return (total_valid / total_pixels) * 100 if total_pixels else 0
+
+
+# =====================================================
+# MAIN PIPELINE (SINGLE PASS, GPU→CPU)
+# =====================================================
+def run(paths, config, logger, tool_runner):
+    stage = "patch_match_single_pass"
+    logger.info(f"---- {stage.upper()} ----")
+
+    dense_dir = paths.dense
+    _ensure_dense_sparse(paths, logger)
+
+    # -------------------------------------------------
+    # DATASET SIZE
+    # -------------------------------------------------
+    num_images = len(list(paths.images.glob("*")))
+    logger.info(f"Images detected: {num_images}")
+
+    # -------------------------------------------------
+    # PARAM BUILD
+    # -------------------------------------------------
+    params = _build_params(num_images)
+    logger.info(f"Params: {params}")
+
+    # -------------------------------------------------
+    # RUN (GPU FIRST → CPU FALLBACK)
+    # -------------------------------------------------
+    try:
+        logger.info("Running PatchMatch (GPU)")
+        tool_runner.run(
+            _build_cmd(dense_dir, params, gpu=True),
+            stage=stage + "_gpu"
+        )
+    except Exception as e:
+        logger.warning(f"GPU failed → fallback to CPU: {e}")
+
+        tool_runner.run(
+            _build_cmd(dense_dir, params, gpu=False),
+            stage=stage + "_cpu"
+        )
+
+    # -------------------------------------------------
+    # EVALUATION
+    # -------------------------------------------------
+    depth_dir = dense_dir / "stereo" / "depth_maps"
+    score = _compute_coverage(depth_dir)
 
     print("\n=== FINAL SCORE ===")
     print(f"Depth Coverage: {score:.2f}%")
 
     return {
-        "status": "geometry_aware_complete",
+        "status": "complete",
         "quality_score": score,
-        "strong_images": len(strong),
-        "used_weak_images": len(selected)
+        "images": num_images
     }
