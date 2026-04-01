@@ -36,9 +36,13 @@ def get_user_paths():
     raw_images_dir.mkdir(parents=True, exist_ok=True)
 
     print("\nCopying images...")
+    count = 0
     for img in input_path.iterdir():
         if is_valid_image(img):
             shutil.copy2(img, raw_images_dir / img.name)
+            count += 1
+
+    print(f"Copied {count} images")
 
     return project_root, raw_images_dir
 
@@ -50,11 +54,12 @@ def get_pipeline_choice():
     print("\n=== Pipeline Selection ===")
     print("A → COLMAP full")
     print("B → GLOMAP + COLMAP dense")
-    print("C → COLMAP + OpenMVS (full MVS pipeline)")
-    print("D → OpenMVG (SfM only)")  # 🔥 NEW
+    print("C → COLMAP + OpenMVS")
+    print("D → OpenMVG (SfM only)")
+    print("E → COLMAP + GSPLAT (Neural Reconstruction)")
 
     choice = input("Select pipeline [A]: ").strip().upper()
-    return choice if choice in ["A", "B", "C", "D"] else "A"
+    return choice if choice in ["A", "B", "C", "D", "E"] else "A"
 
 
 # =====================================================
@@ -62,39 +67,50 @@ def get_pipeline_choice():
 # =====================================================
 def get_user_config(project_root: Path, image_source: Path, pipeline_choice: str):
 
-    # 🔥 Updated backend mapping
-    backend_map = {
-        "A": "colmap",
-        "B": "glomap",
-        "C": "colmap",
-        "D": "openmvg"   # NEW
-    }
-
-    # Base config
     user_config = {
         "paths": {"project_root": str(project_root)},
         "ingestion": {"external_image_path": str(image_source)},
         "downsampling": {"enabled": True},
-        "sparse": {"backend": backend_map[pipeline_choice]},
     }
 
-    # 🔥 Pipeline-specific overrides
+    # -------------------------------------------------
+    # PIPELINE-SPECIFIC CONFIG
+    # -------------------------------------------------
     if pipeline_choice == "C":
         user_config.setdefault("pipeline", {})
-        user_config["pipeline"].update({
-            "dense_backend": "openmvs",
-            "mesh_backend": "openmvs",
-            "texture_backend": "openmvs",
-        })
+        user_config["pipeline"]["backends"] = {
+            "sparse": "colmap",
+            "dense": "openmvs",
+            "mesh": "openmvs",
+            "texture": "openmvs"
+        }
 
-    if pipeline_choice == "D":
-        # OpenMVG = sparse only (for now)
+    elif pipeline_choice == "D":
         user_config.setdefault("pipeline", {})
-        user_config["pipeline"].update({
-            "dense_backend": None,
-            "mesh_backend": None,
-            "texture_backend": None,
-        })
+        user_config["pipeline"]["backends"] = {
+            "sparse": "openmvg",
+            "dense": None,
+            "mesh": None,
+            "texture": None
+        }
+
+    elif pipeline_choice == "E":
+        user_config.setdefault("pipeline", {})
+        user_config["pipeline"]["backends"] = {
+            "sparse": "colmap",
+            "dense": None,        # ❌ disabled
+            "mesh": "gsplat",     # 🔥 gsplat takes over
+            "texture": None
+        }
+
+        # Optional: tweak gsplat params here
+        user_config["mesh"] = {
+            "gsplat": {
+                "iterations": 15000,   # faster testing
+                "extract_resolution": 256,
+                "density_thresh": 0.5
+            }
+        }
 
     return user_config
 

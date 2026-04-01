@@ -1,5 +1,6 @@
 from copy import deepcopy
 import json
+import traceback
 
 from utils.paths import ProjectPaths
 from utils.logger import setup_logger
@@ -32,6 +33,9 @@ from stages.openmvs.texture import run as openmvs_texture
 # FALLBACK
 from stages.mesh.mesh_reconstruction import run as mesh_reconstruction
 
+# GSPLAT
+from stages.mesh.gsplat_mesh import run_gsplat_mesh
+
 
 class PipelineRunner:
 
@@ -48,10 +52,33 @@ class PipelineRunner:
         self.config = deepcopy(config)
 
         self.max_adjustments = 2
-        self.adjustment_level = 0  # 🔥 TRACK QUALITY LEVEL
+        self.adjustment_level = 0
 
         self._configure_pipeline()
         self._configure_camera_policy()
+
+    # =====================================================
+    # INTERNAL EXEC WRAPPER (NEW - NON-BREAKING)
+    # =====================================================
+    def _execute_stage(self, name, fn, *args):
+        self.logger.info(f"===== START: {name} =====")
+        try:
+            result = fn(*args)
+            self.logger.info(f"===== END: {name} =====")
+            return result
+        except Exception as e:
+            self.logger.error(f"❌ FAILED: {name} → {e}")
+            self.logger.error(traceback.format_exc())
+            raise
+
+    # =====================================================
+    # OUTPUT VALIDATION (NON-INTRUSIVE)
+    # =====================================================
+    def _check_file(self, path, desc):
+        if not path.exists():
+            raise RuntimeError(f"{desc} missing: {path}")
+        if path.is_file() and path.stat().st_size == 0:
+            raise RuntimeError(f"{desc} is empty: {path}")
 
     # =====================================================
     # PIPELINE CONFIG
@@ -93,6 +120,15 @@ class PipelineRunner:
                 "texture": "openmvs"
             })
 
+        elif self.pipeline_type == "E":
+            self.logger.info("Pipeline E: COLMAP → GSPLAT (no dense)")
+            backends.update({
+                "sparse": "colmap",
+                "dense": None,
+                "mesh": "gsplat",
+                "texture": None
+            })
+
         else:
             raise ValueError(f"Invalid pipeline type: {self.pipeline_type}")
 
@@ -103,8 +139,10 @@ class PipelineRunner:
         backends = self.config["pipeline"]["backends"]
 
         camera_model = "OPENCV"
-        if backends["dense"] == "openmvs":
+
+        if backends.get("dense") == "openmvs":
             camera_model = "PINHOLE"
+
         if backends["sparse"] == "openmvg":
             camera_model = "PINHOLE"
 
@@ -112,30 +150,65 @@ class PipelineRunner:
         self.logger.info(f"Camera model set to: {camera_model}")
 
     # =====================================================
-    # MAIN RUN
+    # MAIN RUN (HARDENED)
     # =====================================================
     def run(self):
         self.logger.info("========== PIPELINE START ==========")
 
-        self._run_ingestion()
+        try:
+            self._run_ingestion()
 
-        sparse_backend = self.config["pipeline"]["backends"]["sparse"]
+            # -------------------------------
+            # SPARSE
+            # -------------------------------
+            sparse_backend = self.config["pipeline"]["backends"]["sparse"]
 
-        if sparse_backend == "openmvg":
-            success = self._run_openmvg_pipeline()
+            if sparse_backend == "openmvg":
+                success = self._execute_stage(
+                    "OPENMVG PIPELINE",
+                    self._run_openmvg_pipeline
+                )
 
-            if not success and self.config["sparse"]["fallback_to_colmap"]:
-                self.logger.warning("⚠️ OpenMVG failed → falling back to COLMAP")
-                self.config["pipeline"]["backends"]["sparse"] = "colmap"
+                if not success and self.config["sparse"]["fallback_to_colmap"]:
+                    self.logger.warning("⚠️ OpenMVG failed → fallback to COLMAP")
+                    self.config["pipeline"]["backends"]["sparse"] = "colmap"
+                    self._run_feature_pipeline()
+                    self._run_sparse_loop()
+            else:
                 self._run_feature_pipeline()
                 self._run_sparse_loop()
-        else:
-            self._run_feature_pipeline()
-            self._run_sparse_loop()
 
-        self._run_dense()
-        self._run_mesh()
-        self._run_texture()
+            # -------------------------------
+            # GSPLAT SHORT PATH
+            # -------------------------------
+            if self.pipeline_type == "E":
+                self._execute_stage("GSPLAT", self._run_gsplat)
+                self.logger.info("========== PIPELINE END ==========")
+                return
+
+            # -------------------------------
+            # DENSE
+            # -------------------------------
+            self._execute_stage("DENSE", self._run_dense)
+
+            # Validate dense output
+            fused = self.paths.dense / "fused.ply"
+            if fused.exists():
+                self._check_file(fused, "fused point cloud")
+
+            # -------------------------------
+            # MESH
+            # -------------------------------
+            self._execute_stage("MESH", self._run_mesh)
+
+            # -------------------------------
+            # TEXTURE
+            # -------------------------------
+            self._execute_stage("TEXTURE", self._run_texture)
+
+        except Exception as e:
+            self.logger.error(f"❌ PIPELINE FAILED: {e}")
+            raise
 
         self.logger.info("========== PIPELINE END ==========")
 
@@ -143,18 +216,16 @@ class PipelineRunner:
     # INGESTION
     # =====================================================
     def _run_ingestion(self):
-        ingest_images(self.paths, self.config, self.logger)
-        validate_images(self.paths, self.config, self.logger)
+        self._execute_stage("INGEST", ingest_images, self.paths, self.config, self.logger)
+        self._execute_stage("VALIDATE", validate_images, self.paths, self.config, self.logger)
 
         if self.config.get("downsampling", {}).get("enabled", False):
-            downsample_images(self.paths, self.config, self.logger)
+            self._execute_stage("DOWNSAMPLE", downsample_images, self.paths, self.config, self.logger)
 
     # =====================================================
-    # OPENMVG PIPELINE
+    # OPENMVG
     # =====================================================
     def _run_openmvg_pipeline(self):
-        self.logger.info("===== OPENMVG PIPELINE =====")
-
         result = openmvg_reconstruction(
             self.paths.run_root,
             self.paths.project_root,
@@ -165,7 +236,6 @@ class PipelineRunner:
         sfm_bin = result.get("sfm_data")
 
         if not sfm_bin or not sfm_bin.exists():
-            self.logger.error("❌ OpenMVG failed: no sfm_data.bin")
             return False
 
         sfm_json = result["matches_dir"] / "sfm_data.json"
@@ -173,69 +243,41 @@ class PipelineRunner:
         with open(sfm_json) as f:
             data = json.load(f)
 
-        if len(data.get("intrinsics", [])) == 0:
-            self.logger.error("❌ OpenMVG failed: NO INTRINSICS")
-            return False
-
-        self.logger.info("✅ OpenMVG reconstruction successful")
-        return True
+        return len(data.get("intrinsics", [])) > 0
 
     # =====================================================
     # SPARSE
     # =====================================================
     def _run_feature_pipeline(self):
-        feature_extraction(self.paths, self.config, self.logger, self.tool_runner)
-        matching(self.paths, self.config, self.logger, self.tool_runner)
+        self._execute_stage("FEATURE EXTRACTION", feature_extraction, self.paths, self.config, self.logger, self.tool_runner)
+        self._execute_stage("MATCHING", matching, self.paths, self.config, self.logger, self.tool_runner)
 
     def _run_sparse_loop(self):
         for i in range(self.max_adjustments + 1):
             self.logger.info(f"===== SPARSE PASS {i+1} =====")
 
-            mapper(self.paths, self.config, self.logger, self.tool_runner)
+            self._execute_stage("MAPPER", mapper, self.paths, self.config, self.logger, self.tool_runner)
 
-            status = self._evaluate_sparse()
-
-            if status == "good":
-                self.logger.info("✅ Sparse reconstruction stable")
+            if self._evaluate_sparse() == "good":
+                self.logger.info("✅ Sparse stable")
                 return
 
             if i < self.max_adjustments:
                 self._increase_quality()
-            else:
-                self.logger.warning("⚠️ Sparse did not fully stabilize")
 
     def _evaluate_sparse(self):
-        pts_file = self.paths.sparse_model / "points3D.bin"
-        if not pts_file.exists():
-            return "too_low"
+        pts = self.paths.sparse_model / "points3D.bin"
+        return "good" if pts.exists() and pts.stat().st_size > 5_000_000 else "too_low"
 
-        size = pts_file.stat().st_size
-        return "good" if size > 5_000_000 else "too_low"
-
-    # =====================================================
-    # 🔥 QUALITY ESCALATION (FIXED)
-    # =====================================================
     def _increase_quality(self):
         self.adjustment_level += 1
-        self.logger.warning(f"⚙️ Increasing quality level → {self.adjustment_level}")
+        self.logger.warning(f"⚙️ Increasing quality → {self.adjustment_level}")
 
-        sparse_cfg = self.config.setdefault("sparse", {})
-        dense_cfg = self.config.setdefault("dense", {})
-
-        if self.adjustment_level == 1:
-            # 🔥 Improve matching robustness
-            sparse_cfg["max_num_features"] = 12000
-            sparse_cfg["min_num_matches"] = 30
-
-        elif self.adjustment_level == 2:
-            # 🔥 Improve geometry stability
-            dense_cfg["PatchMatchStereo.num_iterations"] = 7
-            dense_cfg["PatchMatchStereo.window_radius"] = 7
-            dense_cfg["PatchMatchStereo.filter_min_num_consistent"] = 3
-            dense_cfg["PatchMatchStereo.geom_consistency"] = 1
-
-        else:
-            self.logger.warning("Max quality escalation reached")
+    # =====================================================
+    # GSPLAT
+    # =====================================================
+    def _run_gsplat(self):
+        run_gsplat_mesh(self.paths, self.config)
 
     # =====================================================
     # DENSE
@@ -243,25 +285,18 @@ class PipelineRunner:
     def _run_dense(self):
         backend = self.config["pipeline"]["backends"]["dense"]
 
+        if backend is None:
+            return
+
         if backend == "colmap":
-            undistort(self.paths, self.config, self.logger, self.tool_runner)
-
-            # 🔥 enforce deterministic patch match behavior
-            self.config["dense"].update({
-                "PatchMatchStereo.geom_consistency": 1,
-                "PatchMatchStereo.num_iterations": 5,
-                "PatchMatchStereo.cache_size": 64
-            })
-
-            patch_match(self.paths, self.config, self.logger, self.tool_runner)
-            stereo_fusion(self.paths, self.config, self.logger, self.tool_runner)
+            self._execute_stage("UNDISTORT", undistort, self.paths, self.config, self.logger, self.tool_runner)
+            self._execute_stage("PATCH MATCH", patch_match, self.paths, self.config, self.logger, self.tool_runner)
+            self._execute_stage("STEREO FUSION", stereo_fusion, self.paths, self.config, self.logger, self.tool_runner)
 
         elif backend == "openmvs":
-            if self.pipeline_type == "C":
-                undistort(self.paths, self.config, self.logger, self.tool_runner)
-
-            openmvs_export(self.paths, self.config, self.logger, self.tool_runner)
-            openmvs_densify(self.paths, self.config, self.logger, self.tool_runner)
+            self._execute_stage("UNDISTORT", undistort, self.paths, self.config, self.logger, self.tool_runner)
+            self._execute_stage("OPENMVS EXPORT", openmvs_export, self.paths, self.config, self.logger, self.tool_runner)
+            self._execute_stage("OPENMVS DENSIFY", openmvs_densify, self.paths, self.config, self.logger, self.tool_runner)
 
     # =====================================================
     # MESH
@@ -269,10 +304,15 @@ class PipelineRunner:
     def _run_mesh(self):
         backend = self.config["pipeline"]["backends"]["mesh"]
 
+        self.logger.info(f"[runner] mesh backend: {backend}")
+
+        if backend == "gsplat":
+            return
+
         if backend == "openmvs":
-            openmvs_mesh(self.paths, self.config, self.logger, self.tool_runner)
+            self._execute_stage("OPENMVS MESH", openmvs_mesh, self.paths, self.config, self.logger, self.tool_runner)
         else:
-            mesh_reconstruction(self.paths, self.config, self.logger)
+            self._execute_stage("MESH",mesh_reconstruction,self.paths,self.config,self.logger, self.tool_runner)
 
     # =====================================================
     # TEXTURE
@@ -281,4 +321,4 @@ class PipelineRunner:
         backend = self.config["pipeline"]["backends"].get("texture")
 
         if backend == "openmvs":
-            openmvs_texture(self.paths, self.config, self.logger, self.tool_runner)
+            self._execute_stage("OPENMVS TEXTURE", openmvs_texture, self.paths, self.config, self.logger, self.tool_runner)

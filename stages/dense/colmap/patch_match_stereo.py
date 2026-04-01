@@ -4,6 +4,13 @@ import numpy as np
 
 
 # =====================================================
+# SCENE ANALYSIS (KEEP SIMPLE, DETERMINISTIC)
+# =====================================================
+def _analyze_scene(num_images):
+    return "turntable_object" if num_images <= 60 else "generic"
+
+
+# =====================================================
 # SPARSE VALIDATION
 # =====================================================
 def _validate_sparse_model(sparse_dir: Path):
@@ -21,7 +28,7 @@ def _validate_sparse_model(sparse_dir: Path):
 
 
 # =====================================================
-# ENSURE CONSISTENCY
+# ENSURE DENSE/SPARSE CONSISTENCY
 # =====================================================
 def _ensure_dense_sparse(paths, logger):
     dense_sparse = paths.dense / "sparse"
@@ -40,126 +47,116 @@ def _ensure_dense_sparse(paths, logger):
 
 
 # =====================================================
-# ADAPTIVE PARAMS (STRICT TO CLI)
+# PARAM BUILDERS (DENSIFICATION-OPTIMIZED)
 # =====================================================
-def _build_params(num_images):
-    """
-    Tuned for:
-    - high density
-    - controlled runtime
-    - stable geometry
-    """
-
-    # Resolution scaling
-    if num_images < 40:
-        max_img_size = 2000
-    elif num_images < 100:
-        max_img_size = 1800
-    else:
-        max_img_size = 1600
-
-def _build_params(num_images):
-    if num_images < 40:
-        max_img_size = 1800
-    elif num_images < 100:
-        max_img_size = 1600
-    else:
-        max_img_size = 1400
-
+def _build_turntable_params():
     return {
-        "max_img_size": max_img_size,
+        # -------------------------------
+        # IMAGE HANDLING
+        # -------------------------------
+        "max_image_size": 2000,
 
-        # 🔥 BIG SPEED GAIN
-        "window_radius": 5,
-        "window_step": 2,   # was 1 → halves compute
+        # -------------------------------
+        # CORE PATCHMATCH (KEY DENSITY LEVER)
+        # -------------------------------
+        "window_radius": 5,        # ⬆ better surface continuity
+        "window_step": 1,
+        "num_samples": 18,         # ⬆ more hypotheses (MAIN densifier)
+        "num_iterations": 5,       # keep bounded
 
-        # 🔥 MAJOR SPEED CONTROL
-        "num_samples": 20,  # was ~40
-        "num_iterations": 5,  # was ~8
+        # -------------------------------
+        # PHOTOMETRIC MATCHING
+        # -------------------------------
+        "sigma_spatial": -1,
+        "sigma_color": 0.25,       # slightly more tolerant
+        "ncc_sigma": 0.55,         # allow harder surfaces
 
-        # matching
-        "sigma_spatial": 4.0,
-        "sigma_color": 0.25,
-        "ncc_sigma": 0.6,
+        # -------------------------------
+        # GEOMETRY (DO NOT OVER-RELAX)
+        # -------------------------------
+        "min_triangulation_angle": 4,
+        "incident_angle_sigma": 0.9,
 
-        # geometry
-        "min_triangulation_angle": 1.0,
-        "incident_angle_sigma": 1.0,
-
-        # 🔥 KEEP THIS ON
+        # -------------------------------
+        # GEOMETRIC CONSISTENCY (CRITICAL)
+        # -------------------------------
         "geom_consistency": 1,
-        "geom_consistency_regularizer": 0.35,
-        "geom_consistency_max_cost": 3,
+        "geom_consistency_regularizer": 0.5,
+        "geom_consistency_max_cost": 2,
 
-        # 🔥 ARTIFACT CONTROL (IMPORTANT)
-        "filter_min_ncc": 0.05,   # was 0.02 → cleaner
-        "filter_min_num_consistent": 2,
-        "filter_min_triangulation_angle": 1.0,
+        # -------------------------------
+        # FILTERING (CONTROLLED RELAXATION)
+        # -------------------------------
+        "filter": 1,
+        "filter_min_ncc": 0.12,                 # ⬇ admit more points
+        "filter_min_triangulation_angle": 3,
+        "filter_min_num_consistent": 2,         # ⬇ allow weaker agreement
         "filter_geom_consistency_max_cost": 2,
 
+        # -------------------------------
+        # PERFORMANCE
+        # -------------------------------
         "cache_size": 64,
     }
 
 
-# =====================================================
-# COMMAND BUILDER (STRICT CLI FLAGS)
-# =====================================================
-def _build_cmd(dense_dir, p, gpu=True):
-    return [
-        "colmap", "patch_match_stereo",
+def _build_generic_params():
+    return {
+        "max_image_size": 2000,
 
+        "window_radius": 6,
+        "window_step": 1,
+        "num_samples": 18,
+        "num_iterations": 5,
+
+        "sigma_spatial": -1,
+        "sigma_color": 0.3,
+        "ncc_sigma": 0.6,
+
+        "min_triangulation_angle": 2,
+        "incident_angle_sigma": 1.0,
+
+        "geom_consistency": 1,
+        "geom_consistency_regularizer": 0.4,
+        "geom_consistency_max_cost": 3,
+
+        "filter": 1,
+        "filter_min_ncc": 0.10,
+        "filter_min_triangulation_angle": 2,
+        "filter_min_num_consistent": 2,
+        "filter_geom_consistency_max_cost": 2,
+
+        "cache_size": 32,
+    }
+
+
+# =====================================================
+# PARAM SELECTOR
+# =====================================================
+def _build_params(scene_type):
+    return _build_turntable_params() if scene_type == "turntable_object" else _build_generic_params()
+
+
+# =====================================================
+# COMMAND BUILDER
+# =====================================================
+def _build_cmd(dense_dir, params, gpu=True):
+    cmd = [
+        "colmap", "patch_match_stereo",
         "--workspace_path", str(dense_dir),
         "--workspace_format", "COLMAP",
-
         "--PatchMatchStereo.gpu_index", "0" if gpu else "-1",
-
-        "--PatchMatchStereo.max_image_size", str(p["max_img_size"]),
-
-        "--PatchMatchStereo.window_radius", str(p["window_radius"]),
-        "--PatchMatchStereo.window_step", str(p["window_step"]),
-
-        "--PatchMatchStereo.num_samples", str(p["num_samples"]),
-        "--PatchMatchStereo.num_iterations", str(p["num_iterations"]),
-
-        "--PatchMatchStereo.sigma_spatial", str(p["sigma_spatial"]),
-        "--PatchMatchStereo.sigma_color", str(p["sigma_color"]),
-        "--PatchMatchStereo.ncc_sigma", str(p["ncc_sigma"]),
-
-        "--PatchMatchStereo.min_triangulation_angle",
-        str(p["min_triangulation_angle"]),
-
-        "--PatchMatchStereo.incident_angle_sigma",
-        str(p["incident_angle_sigma"]),
-
-        "--PatchMatchStereo.geom_consistency",
-        str(p["geom_consistency"]),
-
-        "--PatchMatchStereo.geom_consistency_regularizer",
-        str(p["geom_consistency_regularizer"]),
-
-        "--PatchMatchStereo.geom_consistency_max_cost",
-        str(p["geom_consistency_max_cost"]),
-
-        "--PatchMatchStereo.filter", "1",
-
-        "--PatchMatchStereo.filter_min_ncc",
-        str(p["filter_min_ncc"]),
-
-        "--PatchMatchStereo.filter_min_num_consistent",
-        str(p["filter_min_num_consistent"]),
-
-        "--PatchMatchStereo.filter_min_triangulation_angle",
-        str(p["filter_min_triangulation_angle"]),
-
-        "--PatchMatchStereo.filter_geom_consistency_max_cost",
-        str(p["filter_geom_consistency_max_cost"]),
-
-        "--PatchMatchStereo.cache_size", str(p["cache_size"]),
     ]
+
+    for k, v in params.items():
+        cmd.append(f"--PatchMatchStereo.{k}")
+        cmd.append(str(v))
+
+    return cmd
 
 
 # =====================================================
-# DEPTH LOADING
+# DEPTH LOADER
 # =====================================================
 def _load_depth(path):
     try:
@@ -170,7 +167,7 @@ def _load_depth(path):
 
 
 # =====================================================
-# COVERAGE COMPUTATION
+# COVERAGE METRIC (IMPORTANT FEEDBACK SIGNAL)
 # =====================================================
 def _compute_coverage(depth_dir: Path):
     total_valid = 0
@@ -181,62 +178,73 @@ def _compute_coverage(depth_dir: Path):
         if data is None:
             continue
 
-        total_valid += np.count_nonzero(data > 0)
+        valid = data > 0
+        total_valid += np.count_nonzero(valid)
         total_pixels += data.size
 
     return (total_valid / total_pixels) * 100 if total_pixels else 0
 
 
 # =====================================================
-# MAIN PIPELINE (SINGLE PASS, GPU→CPU)
+# MAIN
 # =====================================================
 def run(paths, config, logger, tool_runner):
-    stage = "patch_match_single_pass"
+    stage = "patch_match_densified_v3"
     logger.info(f"---- {stage.upper()} ----")
 
     dense_dir = paths.dense
     _ensure_dense_sparse(paths, logger)
 
-    # -------------------------------------------------
-    # DATASET SIZE
-    # -------------------------------------------------
     num_images = len(list(paths.images.glob("*")))
     logger.info(f"Images detected: {num_images}")
 
-    # -------------------------------------------------
-    # PARAM BUILD
-    # -------------------------------------------------
-    params = _build_params(num_images)
+    # -----------------------------
+    # SCENE TYPE
+    # -----------------------------
+    scene_type = _analyze_scene(num_images)
+    logger.info(f"Scene type: {scene_type}")
+
+    # -----------------------------
+    # PARAMS
+    # -----------------------------
+    params = _build_params(scene_type)
     logger.info(f"Params: {params}")
 
-    # -------------------------------------------------
-    # RUN (GPU FIRST → CPU FALLBACK)
-    # -------------------------------------------------
+    # -----------------------------
+    # EXECUTION
+    # -----------------------------
     try:
-        logger.info("Running PatchMatch (GPU)")
         tool_runner.run(
             _build_cmd(dense_dir, params, gpu=True),
             stage=stage + "_gpu"
         )
     except Exception as e:
-        logger.warning(f"GPU failed → fallback to CPU: {e}")
+        logger.warning(f"GPU failed → CPU fallback: {e}")
 
         tool_runner.run(
             _build_cmd(dense_dir, params, gpu=False),
             stage=stage + "_cpu"
         )
 
-    # -------------------------------------------------
-    # EVALUATION
-    # -------------------------------------------------
+    # -----------------------------
+    # QUALITY CHECK
+    # -----------------------------
     depth_dir = dense_dir / "stereo" / "depth_maps"
     score = _compute_coverage(depth_dir)
 
-    print("\n=== FINAL SCORE ===")
-    print(f"Depth Coverage: {score:.2f}%")
+    logger.info(f"Depth coverage: {score:.2f}%")
+
+    # -----------------------------
+    # SANITY FLAGGING
+    # -----------------------------
+    if score < 5:
+        logger.warning("⚠️ Extremely low coverage → likely failure")
+    elif score > 60:
+        logger.info("High density achieved (good candidate for pruning)")
 
     return {
         "status": "complete",
         "quality_score": score,
-        "images": num_images
+        "images": num_images,
+        "scene_type": scene_type
     }

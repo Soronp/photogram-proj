@@ -1,214 +1,212 @@
 from pathlib import Path
-import open3d as o3d
 import numpy as np
+import json
+import struct
 
 
 # =====================================================
-# VALIDATE DENSE WORKSPACE
+# PARAMS (KEEP YOUR DENSIFICATION STRATEGY)
 # =====================================================
-def _validate_dense_workspace(dense: Path):
-    stereo = dense / "stereo"
-    depth = stereo / "depth_maps"
-    normal = stereo / "normal_maps"
-
-    return depth.exists() and normal.exists()
-
-
-# =====================================================
-# PARAM BUILDER (HIGH DENSITY, NOT DESTRUCTIVE)
-# =====================================================
-def _build_params(num_images):
-    """
-    Goal:
-    - maximize point count
-    - keep structure stable
-    - avoid over-pruning
-    """
-
-    if num_images < 40:
-        max_pixels = 20000
-    elif num_images < 100:
-        max_pixels = 30000
-    else:
-        max_pixels = 40000
-
+def _build_params():
     return {
         "max_image_size": -1,
-
-        # 🔥 CRITICAL: allow more growth
         "min_num_pixels": 2,
-        "max_num_pixels": max_pixels,
-
-        # 🔥 RELAXED (keeps surfaces alive)
-        "max_reproj_error": 3.0,
-        "max_depth_error": 0.02,
-        "max_normal_error": 25,
-
-        "max_traversal_depth": 150,
-
-        # 🔥 HUGE IMPACT (default=50 is TOO STRICT)
-        "check_num_images": 3,
-
-        "cache_size": 64,
+        "max_num_pixels": 1000000,
+        "max_traversal_depth": 10000,
+        "cache_size": 4096,
         "use_cache": 1,
+        "check_num_images": 2,
+        "max_reproj_error": 1.5,
+        "max_depth_error": 0.03,
+        "max_normal_error": 30,
     }
 
 
 # =====================================================
-# BUILD COMMAND (STRICTLY MATCH CLI)
+# COMMAND
 # =====================================================
 def _build_cmd(dense_dir, out_path, p):
-    return [
+    cmd = [
         "colmap", "stereo_fusion",
-
         "--workspace_path", str(dense_dir),
         "--workspace_format", "COLMAP",
-
         "--input_type", "geometric",
-        "--output_type", "PLY",
         "--output_path", str(out_path),
-
-        "--StereoFusion.max_image_size", str(p["max_image_size"]),
-
-        "--StereoFusion.min_num_pixels", str(p["min_num_pixels"]),
-        "--StereoFusion.max_num_pixels", str(p["max_num_pixels"]),
-
-        "--StereoFusion.max_traversal_depth",
-        str(p["max_traversal_depth"]),
-
-        "--StereoFusion.max_reproj_error",
-        str(p["max_reproj_error"]),
-
-        "--StereoFusion.max_depth_error",
-        str(p["max_depth_error"]),
-
-        "--StereoFusion.max_normal_error",
-        str(p["max_normal_error"]),
-
-        "--StereoFusion.check_num_images",
-        str(p["check_num_images"]),
-
-        "--StereoFusion.cache_size",
-        str(p["cache_size"]),
-
-        "--StereoFusion.use_cache",
-        str(p["use_cache"]),
     ]
 
+    for k, v in p.items():
+        cmd.append(f"--StereoFusion.{k}")
+        cmd.append(str(v))
 
-# =====================================================
-# LOAD POINT CLOUD
-# =====================================================
-def _load_pcd(path):
-    if not path.exists():
-        return None
-
-    pcd = o3d.io.read_point_cloud(str(path))
-    if len(pcd.points) == 0:
-        return None
-
-    return pcd
+    return cmd
 
 
 # =====================================================
-# LIGHT POST PROCESS (NON-DESTRUCTIVE)
+# FAST PLY READER (NO OPEN3D)
 # =====================================================
-def _post_process(pcd):
-    if pcd is None:
-        return None
+def _read_ply_xyz(path):
+    """
+    Reads only XYZ from PLY (ASCII or binary little endian)
+    Returns: Nx3 numpy array
+    """
+    with open(path, "rb") as f:
+        header = []
+        while True:
+            line = f.readline().decode("utf-8").strip()
+            header.append(line)
+            if line == "end_header":
+                break
 
-    pts = np.asarray(pcd.points)
+        is_binary = any("binary_little_endian" in h for h in header)
 
-    # --- only downsample if EXTREMELY large
-    if len(pts) > 1_000_000:
-        pcd = pcd.voxel_down_sample(voxel_size=0.005)
+        # Get vertex count
+        vertex_count = 0
+        for h in header:
+            if h.startswith("element vertex"):
+                vertex_count = int(h.split()[-1])
 
-    # --- VERY light cleanup (keep density)
-    filtered, _ = pcd.remove_statistical_outlier(
-        nb_neighbors=8,
-        std_ratio=3.0
-    )
+        if vertex_count == 0:
+            return np.empty((0, 3))
 
-    # keep if not destructive
-    if len(filtered.points) > 0.85 * len(pcd.points):
-        pcd = filtered
+        if not is_binary:
+            # ASCII
+            data = []
+            for _ in range(vertex_count):
+                vals = f.readline().decode("utf-8").split()
+                data.append([float(vals[0]), float(vals[1]), float(vals[2])])
+            return np.array(data)
 
-    return pcd
+        else:
+            # Binary little endian
+            pts = []
+            for _ in range(vertex_count):
+                x, y, z = struct.unpack("<fff", f.read(12))
+                pts.append([x, y, z])
+            return np.array(pts)
+
+
+# =====================================================
+# VALIDATION
+# =====================================================
+def _validate_points(points, logger):
+    if len(points) == 0:
+        raise RuntimeError("❌ No points in fused cloud")
+
+    # Remove NaN / inf safely
+    mask = np.isfinite(points).all(axis=1)
+    clean = points[mask]
+
+    removed = len(points) - len(clean)
+    if removed > 0:
+        logger.warning(f"[fusion] Removed {removed} invalid points")
+
+    if len(clean) < 1000:
+        logger.warning("[fusion] Very low point count")
+
+    # Compute scale
+    center = clean.mean(axis=0)
+    dists = np.linalg.norm(clean - center, axis=1)
+    scale = np.percentile(dists, 90)
+
+    spread = np.linalg.norm(clean.max(axis=0) - clean.min(axis=0))
+    logger.info(f"[fusion] Spread ratio: {spread / (scale + 1e-6):.2f}")
+
+    return clean, scale
+
+
+# =====================================================
+# OPTIONAL LIGHT FILTER (SAFE)
+# =====================================================
+def _light_filter(points, logger):
+    """
+    Removes extreme outliers ONLY.
+    Does NOT damage geometry.
+    """
+    if len(points) < 5000:
+        return points
+
+    center = points.mean(axis=0)
+    dists = np.linalg.norm(points - center, axis=1)
+
+    thresh = np.percentile(dists, 99.5)  # very loose
+    mask = dists < thresh
+
+    filtered = points[mask]
+
+    logger.info(f"[fusion] Light filter: {len(points)} → {len(filtered)}")
+
+    return filtered
+
+
+# =====================================================
+# METADATA
+# =====================================================
+def _save_metadata(points, scale, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    metadata = {
+        "num_points": int(len(points)),
+        "scale": float(scale),
+    }
+
+    with open(path, "w") as f:
+        json.dump(metadata, f, indent=2)
 
 
 # =====================================================
 # MAIN
 # =====================================================
 def run(paths, config, logger, tool_runner):
-    stage = "stereo_fusion_single_pass"
-    logger.info(f"==== {stage.upper()} ====")
+    logger.info("==== STEREO FUSION (COLMAP-ONLY STABLE) ====")
 
     dense_dir = paths.dense
-
-    # -------------------------------------------------
-    # VALIDATION
-    # -------------------------------------------------
-    if not _validate_dense_workspace(dense_dir):
-        raise RuntimeError(
-            "Dense workspace invalid → run patch_match_stereo first"
-        )
-
-    # -------------------------------------------------
-    # DATASET SIZE
-    # -------------------------------------------------
-    num_images = len(list(paths.images.glob("*")))
-    logger.info(f"Images detected: {num_images}")
-
-    # -------------------------------------------------
-    # PARAM BUILD
-    # -------------------------------------------------
-    params = _build_params(num_images)
-    logger.info(f"Params: {params}")
-
-    # -------------------------------------------------
-    # RUN FUSION
-    # -------------------------------------------------
     out_path = dense_dir / "fused.ply"
+    meta_path = dense_dir / "fusion_metadata.json"
 
-    cmd = _build_cmd(dense_dir, out_path, params)
+    # ---------------------------
+    # RUN COLMAP
+    # ---------------------------
+    ret = tool_runner.run(
+        _build_cmd(dense_dir, out_path, _build_params()),
+        stage="fusion"
+    )
 
-    tool_runner.run(cmd, stage=stage)
+    # 🔥 CRITICAL FIX: correct success check
+    if ret["returncode"] != 0:
+        raise RuntimeError(f"COLMAP stereo_fusion failed: {ret}")
 
-    # -------------------------------------------------
-    # LOAD RESULT
-    # -------------------------------------------------
-    pcd = _load_pcd(out_path)
+    if not out_path.exists():
+        raise RuntimeError("fused.ply not created")
 
-    if pcd is None:
-        raise RuntimeError("Fusion failed → empty output")
+    logger.info("[fusion] COLMAP finished successfully")
 
-    logger.info(f"Raw points: {len(pcd.points)}")
+    # ---------------------------
+    # READ POINTS (SAFE)
+    # ---------------------------
+    points = _read_ply_xyz(out_path)
 
-    # -------------------------------------------------
-    # POST PROCESS
-    # -------------------------------------------------
-    pcd = _post_process(pcd)
+    logger.info(f"[fusion] Raw points: {len(points)}")
 
-    logger.info(f"Final points: {len(pcd.points)}")
+    # ---------------------------
+    # VALIDATION
+    # ---------------------------
+    points, scale = _validate_points(points, logger)
 
-    # -------------------------------------------------
-    # SAVE FINAL
-    # -------------------------------------------------
-    final_path = dense_dir / "fused_final.ply"
-    o3d.io.write_point_cloud(str(final_path), pcd)
+    # ---------------------------
+    # OPTIONAL FILTER (SAFE)
+    # ---------------------------
+    points = _light_filter(points, logger)
 
-    print("\n=== FUSION RESULT ===")
-    print(f"Points: {len(pcd.points)}")
+    # ---------------------------
+    # SAVE METADATA ONLY
+    # (DO NOT rewrite PLY)
+    # ---------------------------
+    _save_metadata(points, scale, meta_path)
 
-    if len(pcd.points) > 500000:
-        print("Quality: HIGH")
-    elif len(pcd.points) > 100000:
-        print("Quality: MEDIUM")
-    else:
-        print("Quality: LOW")
+    logger.info(f"[fusion] Final points: {len(points)}")
 
     return {
         "status": "complete",
-        "points": len(pcd.points),
-        "images": num_images
+        "points": int(len(points)),
+        "scale": float(scale)
     }

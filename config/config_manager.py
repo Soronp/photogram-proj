@@ -1,6 +1,7 @@
 from copy import deepcopy
 from pathlib import Path
 
+
 # =====================================================
 # DEFAULT CONFIG
 # =====================================================
@@ -91,15 +92,11 @@ DEFAULT_CONFIG = {
         "openmvg": {
             "feature_type": "SIFT",
             "matching_strategy": "ANNL2",
-
             "camera_model": "PINHOLE",
             "num_threads": -1,
-
             "sensor_database": "D:/CSE499_MK-2/OpenMVG/sensor_width_database/sensor_width_camera_database.txt",
-
             "geometric_model": "e",
             "guided_matching": True,
-
             "fallback_focal_multiplier": 1.2
         }
     },
@@ -108,6 +105,8 @@ DEFAULT_CONFIG = {
     # DENSE BACKENDS
     # =====================================================
     "dense": {
+
+        "enabled": True,  # 🔥 NEW (allows skipping)
 
         "colmap": {
             "window_radius": 7,
@@ -157,7 +156,37 @@ DEFAULT_CONFIG = {
         "hybrid": {
             "poisson_depth": 10,
             "bpa_radius": 0.02
+        },
+
+        # 🔥 NEW: GSPLAT BACKEND
+        "gsplat": {
+            "iterations": 30000,
+            "sh_degree": 3,
+            "densify_until_iter": 15000,
+            "densify_grad_threshold": 0.0002,
+            "opacity_reset_interval": 3000,
+            "white_background": False,
+
+            # mesh extraction
+            "extract_resolution": 512,
+            "density_thresh": 0.5
         }
+    },
+
+    # =====================================================
+    # GSPLAT / GAUSSIAN SETTINGS (GLOBAL CONTROL)
+    # =====================================================
+    "gsplat": {
+        "enabled": False,  # 🔥 master switch
+        "use_gpu": True,
+        "data_device": "cuda",
+
+        # input handling
+        "use_downsampled": True,
+
+        # training behavior
+        "save_checkpoints": True,
+        "checkpoint_interval": 5000
     },
 
     # =====================================================
@@ -167,15 +196,6 @@ DEFAULT_CONFIG = {
         "openmvs": {
             "resolution": 4096
         }
-    },
-
-    # =====================================================
-    # GAUSSIAN SPLATTING
-    # =====================================================
-    "gaussian": {
-        "enabled": False,
-        "iterations": 30000,
-        "resolution": 1.0
     },
 
     # =====================================================
@@ -208,47 +228,56 @@ def load_config(user_config=None):
         _deep_update(config, user_config)
 
     _resolve_camera_model(config)
+    _resolve_pipeline_dependencies(config)   # 🔥 NEW
     _validate_openmvg(config)
+    _validate_gsplat(config)                 # 🔥 NEW
 
     return config
 
 
 # =====================================================
-# CAMERA MODEL RESOLUTION (FIXED)
+# CAMERA MODEL RESOLUTION
 # =====================================================
 def _resolve_camera_model(config):
     pipeline = config["pipeline"]
-    backends = pipeline["backends"]
+    sparse_backend = pipeline["backends"]["sparse"]
 
-    sparse_backend = backends["sparse"]
-
-    # -------------------------------------------------
-    # 🔥 CORRECT LOGIC: BASED ON SPARSE ONLY
-    # -------------------------------------------------
     if sparse_backend in ["colmap", "glomap"]:
         camera_model = "SIMPLE_RADIAL"
-
     elif sparse_backend == "openmvg":
         camera_model = "PINHOLE"
-
     else:
         camera_model = "SIMPLE_RADIAL"
 
-    # -------------------------------------------------
-    # 🔥 USER OVERRIDE (RESPECTED)
-    # -------------------------------------------------
     user_choice = pipeline.get("camera_model")
 
     if user_choice == "pinhole":
         camera_model = "PINHOLE"
-
     elif user_choice == "opencv":
         camera_model = "OPENCV"
-
     elif user_choice == "simple_radial":
         camera_model = "SIMPLE_RADIAL"
 
     config["pipeline"]["camera_model"] = camera_model
+
+
+# =====================================================
+# 🔥 PIPELINE DEPENDENCY RESOLUTION (CRITICAL)
+# =====================================================
+def _resolve_pipeline_dependencies(config):
+    mesh_backend = config["pipeline"]["backends"]["mesh"]
+
+    # -------------------------------------------------
+    # GSPLAT SPECIAL HANDLING
+    # -------------------------------------------------
+    if mesh_backend == "gsplat":
+        config["gsplat"]["enabled"] = True
+
+        # 🔥 Skip dense stage (gsplat doesn't need MVS)
+        config["dense"]["enabled"] = False
+
+    else:
+        config["gsplat"]["enabled"] = False
 
 
 # =====================================================
@@ -259,8 +288,7 @@ def _validate_openmvg(config):
     if sparse_backend != "openmvg":
         return
 
-    openmvg_cfg = config["sparse"]["openmvg"]
-    sensor_db = openmvg_cfg.get("sensor_database")
+    sensor_db = config["sparse"]["openmvg"].get("sensor_database")
 
     if sensor_db:
         db_path = Path(sensor_db)
@@ -268,6 +296,21 @@ def _validate_openmvg(config):
             raise FileNotFoundError(
                 f"[OpenMVG] Sensor database not found: {sensor_db}"
             )
+
+
+# =====================================================
+# 🔥 GSPLAT VALIDATION
+# =====================================================
+def _validate_gsplat(config):
+    if not config["gsplat"]["enabled"]:
+        return
+
+    sparse_backend = config["pipeline"]["backends"]["sparse"]
+
+    if sparse_backend not in ["colmap", "openmvg"]:
+        raise ValueError(
+            "[GSPLAT] Requires a valid SfM backend (colmap/openmvg)"
+        )
 
 
 # =====================================================

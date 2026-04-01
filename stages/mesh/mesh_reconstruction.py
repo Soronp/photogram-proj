@@ -1,164 +1,145 @@
 from pathlib import Path
-import open3d as o3d
-import numpy as np
+import json
 
 
 # =====================================================
-# DETERMINISM
+# METADATA
 # =====================================================
-def _set_determinism():
-    np.random.seed(42)
+def _load_metadata(path):
+    if not path.exists():
+        raise RuntimeError("Missing fusion_metadata.json")
 
-
-# =====================================================
-# SCALE ESTIMATION
-# =====================================================
-def _compute_scale(pcd):
-    pts = np.asarray(pcd.points)
-    center = pts.mean(axis=0)
-    dists = np.linalg.norm(pts - center, axis=1)
-    return np.percentile(dists, 90)
+    with open(path, "r") as f:
+        return json.load(f)
 
 
 # =====================================================
-# NORMALS (STABLE + GLOBAL)
+# SAFE TOOL EXECUTION (MATCHES YOUR TOOLRUNNER)
 # =====================================================
-def _compute_normals(pcd, logger):
-    logger.info("mesh: computing normals")
-
-    scale = _compute_scale(pcd)
-    radius = max(scale * 0.02, 0.01)
-
-    pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(
-            radius=radius,
-            max_nn=60
-        )
+def _run(tool_runner, cmd, logger, stage, allow_fail=False):
+    ret = tool_runner.run(
+        cmd,
+        stage=stage,
+        allow_failure=allow_fail
     )
 
-    pcd.orient_normals_consistent_tangent_plane(100)
-
-    # Global orientation fix
-    pts = np.asarray(pcd.points)
-    normals = np.asarray(pcd.normals)
-    center = pts.mean(axis=0)
-
-    direction = pts - center
-    dot = np.einsum('ij,ij->i', direction, normals)
-
-    if np.mean(dot > 0) < 0.5:
-        logger.info("mesh: flipping normals")
-        pcd.normals = o3d.utility.Vector3dVector(-normals)
-
-    return pcd
+    return ret
 
 
 # =====================================================
-# POISSON (COMPLETENESS-FIRST)
+# DELAUNAY MESHING
 # =====================================================
-def _run_poisson(pcd, logger):
-    pts = len(pcd.points)
+def _run_delaunay(paths, tool_runner, logger):
+    out_path = paths.dense / "mesh_delaunay.ply"
 
-    # Slightly higher depth for completeness
-    if pts < 300_000:
-        depth = 10
-    elif pts < 1_000_000:
-        depth = 11
-    elif pts < 3_000_000:
-        depth = 12
-    else:
-        depth = 13
+    cmd = [
+        "colmap", "delaunay_mesher",
+        "--input_path", str(paths.dense),
+        "--output_path", str(out_path)
+    ]
 
-    logger.info(f"mesh: poisson depth = {depth}")
+    logger.info("[mesh] Running DELAUNAY")
 
-    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-        pcd,
-        depth=depth,
-        scale=1.1,         # 🔥 EXPAND surface → fills gaps
-        linear_fit=False   # 🔥 more robust than True
-    )
+    ret = _run(tool_runner, cmd, logger, "delaunay", allow_fail=True)
 
-    # ❌ NO density filtering → prevents holes
+    if ret["returncode"] != 0 or not out_path.exists():
+        logger.warning("[mesh] Delaunay failed")
+        return None
 
-    return mesh
+    return out_path
 
 
 # =====================================================
-# CLEAN (SAFE ONLY)
+# POISSON MESHING
 # =====================================================
-def _clean(mesh, logger):
-    logger.info("mesh: cleaning")
+def _run_poisson(paths, tool_runner, logger):
+    out_path = paths.dense / "mesh_poisson.ply"
 
-    mesh.remove_degenerate_triangles()
-    mesh.remove_duplicated_triangles()
-    mesh.remove_duplicated_vertices()
-    mesh.remove_non_manifold_edges()
+    cmd = [
+        "colmap", "poisson_mesher",
+        "--input_path", str(paths.dense / "fused.ply"),
+        "--output_path", str(out_path),
+        "--PoissonMeshing.trim", "10",
+        "--PoissonMeshing.depth", "11"
+    ]
 
-    return mesh
+    logger.info("[mesh] Running POISSON")
 
+    ret = _run(tool_runner, cmd, logger, "poisson", allow_fail=True)
 
-# =====================================================
-# OPTIONAL: LIGHT HOLE FILLING
-# =====================================================
-def _fill_holes(mesh, logger):
-    logger.info("mesh: light smoothing (hole reduction)")
+    if ret["returncode"] != 0 or not out_path.exists():
+        logger.warning("[mesh] Poisson failed")
+        return None
 
-    # VERY light smoothing → helps fill micro gaps
-    mesh = mesh.filter_smooth_laplacian(
-        number_of_iterations=2
-    )
-
-    return mesh
+    return out_path
 
 
 # =====================================================
-# MAIN
+# VALIDATION (FILE-LEVEL, FAST)
 # =====================================================
-def run(paths, config, logger):
-    _set_determinism()
+def _validate_mesh(path, logger):
+    try:
+        size = path.stat().st_size
 
-    logger.info("---- MESH_RECONSTRUCTION (COMPLETENESS MODE) ----")
+        if size < 10000:
+            raise RuntimeError("Too small")
+
+        logger.info(f"[mesh] Valid mesh ({size/1e6:.2f} MB)")
+        return True
+
+    except Exception as e:
+        logger.warning(f"[mesh] Invalid mesh: {e}")
+        return False
+
+
+# =====================================================
+# SELECT BEST RESULT
+# =====================================================
+def _select_mesh(delaunay, poisson, final_path, logger):
+    # Prefer Poisson
+    if poisson and _validate_mesh(poisson, logger):
+        logger.info("[mesh] Using POISSON result")
+        poisson.replace(final_path)
+        return
+
+    # Fallback to Delaunay
+    if delaunay and _validate_mesh(delaunay, logger):
+        logger.info("[mesh] Using DELAUNAY fallback")
+        delaunay.replace(final_path)
+        return
+
+    raise RuntimeError("No valid mesh produced")
+
+
+# =====================================================
+# MAIN ENTRY (FIXED SIGNATURE)
+# =====================================================
+def run(paths, config, logger, tool_runner):
+    logger.info("==== MESH STAGE (COLMAP HYBRID STABLE) ====")
+
+    fused = paths.dense / "fused.ply"
+    meta_path = paths.dense / "fusion_metadata.json"
+    final_mesh = paths.mesh_file
+
+    if not fused.exists():
+        raise RuntimeError("Missing fused.ply")
+
+    _load_metadata(meta_path)
 
     # -------------------------------------------------
-    # LOAD (USE BEST FUSED FILE)
+    # RUN BOTH METHODS (SAFE)
     # -------------------------------------------------
-    if not paths.fused.exists():
-        raise RuntimeError("fused.ply missing")
-
-    pcd = o3d.io.read_point_cloud(str(paths.fused))
-
-    if len(pcd.points) < 5000:
-        raise RuntimeError("insufficient points")
-
-    logger.info(f"mesh: input points = {len(pcd.points)}")
-
-    # ❌ NO PRE-CLEAN → preserve full geometry
+    delaunay_mesh = _run_delaunay(paths, tool_runner, logger)
+    poisson_mesh = _run_poisson(paths, tool_runner, logger)
 
     # -------------------------------------------------
-    # NORMALS
+    # SELECT BEST
     # -------------------------------------------------
-    pcd = _compute_normals(pcd, logger)
+    _select_mesh(delaunay_mesh, poisson_mesh, final_mesh, logger)
 
-    # -------------------------------------------------
-    # POISSON
-    # -------------------------------------------------
-    mesh = _run_poisson(pcd, logger)
+    logger.info(f"[mesh] FINAL OUTPUT → {final_mesh}")
 
-    # -------------------------------------------------
-    # CLEAN
-    # -------------------------------------------------
-    mesh = _clean(mesh, logger)
-
-    # -------------------------------------------------
-    # LIGHT HOLE FIX
-    # -------------------------------------------------
-    mesh = _fill_holes(mesh, logger)
-
-    mesh.compute_vertex_normals()
-
-    # -------------------------------------------------
-    # SAVE
-    # -------------------------------------------------
-    o3d.io.write_triangle_mesh(str(paths.mesh_file), mesh)
-
-    logger.info(f"mesh: SUCCESS → {paths.mesh_file}")
+    return {
+        "status": "complete",
+        "mesh": str(final_mesh)
+    }

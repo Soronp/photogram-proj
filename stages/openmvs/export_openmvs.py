@@ -77,7 +77,7 @@ def run(paths, config, logger, tool_runner):
     stage = "openmvs_export"
     logger.info(f"---- {stage.upper()} ----")
 
-    sparse_backend = config["sparse"]["backend"]
+    sparse_backend = config["pipeline"]["backends"]["sparse"]
 
     mvs_dir = (paths.run_root / "openmvs").resolve()
     mvs_dir.mkdir(parents=True, exist_ok=True)
