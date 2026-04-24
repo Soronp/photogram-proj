@@ -60,61 +60,85 @@ def run(paths, config, logger, tool_runner):
     # ⚙️ CONFIG
     # =====================================================
     cfg = config.get("texture", {})
+    pipeline_mode = config.get("pipeline_mode", "default")
 
     cuda_device = cfg.get("cuda_device", -1)
     resolution_level = cfg.get("resolution_level", 0)
 
     # =====================================================
-    # 🧹 CLEAN PREVIOUS OUTPUTS (IMPORTANT)
+    # 🧹 CLEAN OUTPUT
     # =====================================================
     for f in texture_dir.glob("*"):
         f.unlink()
 
     # =====================================================
-    # 🚀 COMMAND (WORKSPACE-CORRECT)
+    # 🧠 BUILD COMMAND
     # =====================================================
-    # 🔥 IMPORTANT:
-    # Let OpenMVS decide format based on mesh input
-    # Do NOT force only OBJ
-
     output_base = texture_dir / "mesh_textured"
 
     cmd = [
         "TextureMesh",
-
         "-i", str(dense_scene),
         "-m", str(mesh_input),
-
-        # base name only (no extension assumption)
         "-o", str(output_base),
-
         "-w", str(mvs_dir),
-
         "--cuda-device", str(cuda_device),
-
-        # =====================================================
-        # 🎨 STABLE PARAMETERS (POST-FIX BASELINE)
-        # =====================================================
-        "--resolution-level", str(resolution_level),
-
-        "--global-seam-leveling", "0",
-        "--local-seam-leveling", "0",
-
-        "--cost-smoothness-ratio", "0.3",
-        "--patch-packing-heuristic", "3",
-
-        "--empty-color", "16777215",  # white fallback
-
-        "--sharpness-weight", "0.2",
-        "--max-texture-size", "8192",
     ]
 
+    # =====================================================
+    # 🚀 PIPELINE D (HACK MODE)
+    # =====================================================
+    if pipeline_mode == "D":
+        logger.warning(f"[{stage}] PIPELINE D DETECTED → using RELAXED TEXTURING MODE")
+
+        cmd += [
+            # 🔥 relax constraints to FORCE projection
+            "--min-views", "1",
+            "--outlier-threshold", "10",
+
+            # 🔥 less strict resolution matching
+            "--resolution-level", "1",
+
+            # 🔥 disable seam enforcement (helps weak geometry)
+            "--global-seam-leveling", "0",
+            "--local-seam-leveling", "0",
+
+            # 🔥 allow noisier patch selection
+            "--cost-smoothness-ratio", "0.1",
+            "--patch-packing-heuristic", "3",
+
+            # 🔥 debug-friendly fallback
+            "--empty-color", "0",
+
+            "--sharpness-weight", "0.1",
+            "--max-texture-size", "8192",
+        ]
+
+    # =====================================================
+    # ⚙️ DEFAULT (STABLE / HYBRID PIPELINE)
+    # =====================================================
+    else:
+        cmd += [
+            "--resolution-level", str(resolution_level),
+
+            "--global-seam-leveling", "0",
+            "--local-seam-leveling", "0",
+
+            "--cost-smoothness-ratio", "0.3",
+            "--patch-packing-heuristic", "3",
+
+            "--empty-color", "16777215",
+
+            "--sharpness-weight", "0.2",
+            "--max-texture-size", "8192",
+        ]
+
+    # =====================================================
+    # 🚀 EXECUTION
+    # =====================================================
     logger.info(f"[{stage}] COMMAND:")
     logger.info(" ".join(cmd))
 
-    # =====================================================
-    # ▶️ EXECUTION
-    # =====================================================
     result = subprocess.run(
         cmd,
         cwd=str(mvs_dir),
@@ -134,7 +158,7 @@ def run(paths, config, logger, tool_runner):
         raise RuntimeError(f"{stage}: TextureMesh failed")
 
     # =====================================================
-    # ✅ OUTPUT RESOLUTION (CRITICAL FIX)
+    # ✅ OUTPUT VALIDATION
     # =====================================================
     final_output = _find_output(texture_dir)
 
@@ -145,11 +169,21 @@ def run(paths, config, logger, tool_runner):
         )
 
     # =====================================================
-    # 📊 EXTRA VALIDATION (OPTIONAL BUT STRONG)
+    # 📊 QUALITY CHECK
     # =====================================================
     size_mb = final_output.stat().st_size / (1024 * 1024)
 
     if size_mb < 1:
-        logger.warning(f"{stage}: suspiciously small output ({size_mb:.2f} MB)")
+        logger.warning(
+            f"{stage}: suspiciously small output ({size_mb:.2f} MB) "
+            f"→ likely weak projection"
+        )
+
+    # 🔥 extra hint for Pipeline D users
+    if pipeline_mode == "D":
+        logger.warning(
+            f"{stage}: Pipeline D uses relaxed texturing → "
+            f"result may be noisy or partially incorrect"
+        )
 
     logger.info(f"{stage}: SUCCESS → {final_output}")

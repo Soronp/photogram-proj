@@ -1,27 +1,90 @@
 from pathlib import Path
 import shutil
+import subprocess
 
 
-def _find_best_sparse_model(sparse_root: Path):
+# =====================================================
+# 🔍 COLMAP / GLOMAP MODEL CHECK
+# =====================================================
+def _analyze_colmap_model(model_path: Path):
+    images = model_path / "images.bin"
+    points = model_path / "points3D.bin"
+
+    if not images.exists():
+        return False, 0
+
+    pts_count = 0
+
+    if points.exists():
+        try:
+            cmd = ["colmap", "model_analyzer", "--path", str(model_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            for line in result.stdout.splitlines():
+                if "Points:" in line:
+                    pts_count = int(line.split(":")[-1].strip())
+                    break
+        except:
+            pts_count = 0
+
+    return True, pts_count
+
+
+# =====================================================
+# 🔍 FIND BEST MODEL (COLMAP/GLOMAP)
+# =====================================================
+def _find_best_colmap_model(sparse_root: Path, logger):
     models = [p for p in sparse_root.iterdir() if p.is_dir()]
 
     if not models:
-        raise RuntimeError("image_undistorter: no sparse models found")
+        raise RuntimeError("No sparse models found")
 
-    def score(model):
-        pts = model / "points3D.bin"
-        if not pts.exists():
-            return 0
-        return pts.stat().st_size  # 🔥 proxy for reconstruction quality
+    scored = []
 
-    best = max(models, key=score)
+    for m in models:
+        valid, pts = _analyze_colmap_model(m)
+        if valid:
+            scored.append((m, pts))
 
-    if score(best) == 0:
-        raise RuntimeError("image_undistorter: no valid sparse model (points3D missing)")
+    if not scored:
+        raise RuntimeError("No usable model (missing images.bin)")
 
-    return best
+    best = max(scored, key=lambda x: x[1])
+
+    if best[1] < 50:
+        logger.warning(
+            f"weak sparse model ({best[1]} points) → results may degrade"
+        )
+
+    return best[0]
 
 
+# =====================================================
+# 🔍 FIND OPENMVG MODEL
+# =====================================================
+def _find_openmvg_model(sparse_root: Path):
+    sfm_file = sparse_root / "openmvg_reconstruction" / "sfm_data.bin"
+
+    if not sfm_file.exists():
+        raise RuntimeError("OpenMVG sfm_data.bin not found")
+
+    return sfm_file
+
+
+# =====================================================
+# 🧹 CLEAN DENSE
+# =====================================================
+def _clean_dense(dense_dir: Path, logger):
+    for sub in ["images", "sparse"]:
+        p = dense_dir / sub
+        if p.exists():
+            logger.warning(f"clearing {p}")
+            shutil.rmtree(p)
+
+
+# =====================================================
+# 🚀 MAIN
+# =====================================================
 def run(paths, config, logger, tool_runner):
     stage = "image_undistorter"
     logger.info(f"---- {stage.upper()} ----")
@@ -30,123 +93,87 @@ def run(paths, config, logger, tool_runner):
     image_dir = paths.images
     dense_dir = paths.dense
 
+    backend = config.get("pipeline", {}).get("backends", {}).get("sparse")
+
+    if not backend:
+        backend = "colmap"
+
     # =====================================================
     # 🔥 VALIDATION
     # =====================================================
     if not sparse_root.exists():
-        raise RuntimeError(f"{stage}: sparse folder missing")
+        raise RuntimeError("Sparse folder missing")
 
     if not image_dir.exists():
-        raise RuntimeError(f"{stage}: image directory missing")
+        raise RuntimeError("Image directory missing")
 
     dense_dir.mkdir(parents=True, exist_ok=True)
 
     # =====================================================
-    # 🔥 SELECT BEST SPARSE MODEL
+    # 🔵 COLMAP / GLOMAP (UNIFIED PATH)
     # =====================================================
-    sparse_model = _find_best_sparse_model(sparse_root)
-    logger.info(f"{stage}: using sparse model → {sparse_model.name}")
+    if backend in ("colmap", "glomap"):
+        logger.info(f"image_undistorter: backend = {backend.upper()}")
+
+        sparse_model = _find_best_colmap_model(sparse_root, logger)
+        logger.info(f"Using model → {sparse_model.name}")
+
+        _clean_dense(dense_dir, logger)
+
+        cmd = [
+            "colmap", "image_undistorter",
+            "--image_path", str(image_dir),
+            "--input_path", str(sparse_model),
+            "--output_path", str(dense_dir),
+            "--output_type", "COLMAP",
+        ]
+
+        tool_runner.run(cmd, stage=stage)
 
     # =====================================================
-    # 🔥 ANALYSIS INPUT
+    # 🟢 OPENMVG
     # =====================================================
-    analysis = config.get("analysis_results", {})
-    dataset = analysis.get("dataset", {})
+    elif backend == "openmvg":
+        logger.info("image_undistorter: backend = OPENMVG")
 
-    num_images = dataset.get("num_images", 0)
-    avg_resolution = dataset.get("avg_resolution", 2000)
-    retry = config.get("_meta", {}).get("retry_count", 0)
+        sfm_file = _find_openmvg_model(sparse_root)
+        logger.info(f"Using sfm_data → {sfm_file}")
 
-    # =====================================================
-    # 🔥 RESOLUTION STRATEGY (MORE AGGRESSIVE)
-    # =====================================================
-    # 🔥 KEY CHANGE: prioritize detail, not safety
-    if retry == 0:
-        max_image_size = 3000
-        logger.info(f"{stage}: HIGH DETAIL mode")
+        _clean_dense(dense_dir, logger)
 
-    elif retry == 1:
-        max_image_size = 3600
-        logger.info(f"{stage}: BOOST DETAIL mode")
+        undistorted_dir = dense_dir / "images"
+        undistorted_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            "openMVG_main_ExportUndistortedImages",
+            "-i", str(sfm_file),
+            "-o", str(undistorted_dir)
+        ]
+
+        tool_runner.run(cmd, stage=stage)
 
     else:
-        max_image_size = 4000
-        logger.info(f"{stage}: MAX DETAIL mode")
-
-    # Adaptive clamp based on dataset
-    if avg_resolution < 1800:
-        max_image_size = min(max_image_size, 2600)
-
-    max_image_size = min(max_image_size, 4000)
-
-    logger.info(
-        f"{stage}: images={num_images}, "
-        f"avg_res={avg_resolution}, "
-        f"max_image_size={max_image_size}"
-    )
+        raise ValueError(f"Unsupported sparse backend: {backend}")
 
     # =====================================================
-    # 🔥 CLEAN PREVIOUS DENSE OUTPUT (SAFE)
+    # ✅ VALIDATION
     # =====================================================
-    dense_images_dir = dense_dir / "images"
-    dense_sparse_dir = dense_dir / "sparse"
-
-    if dense_images_dir.exists():
-        logger.warning(f"{stage}: clearing previous dense/images")
-        shutil.rmtree(dense_images_dir)
-
-    if dense_sparse_dir.exists():
-        logger.warning(f"{stage}: clearing previous dense/sparse")
-        shutil.rmtree(dense_sparse_dir)
-
-    # =====================================================
-    # 🔥 COMMAND
-    # =====================================================
-    cmd = [
-        "colmap",
-        "image_undistorter",
-        "--image_path", str(image_dir),
-        "--input_path", str(sparse_model),
-        "--output_path", str(dense_dir),
-        "--output_type", "COLMAP",
-
-        # CRITICAL: drives ALL downstream density
-        "--max_image_size", str(max_image_size),
-    ]
-
-    # =====================================================
-    # 🔥 EXECUTION
-    # =====================================================
-    tool_runner.run(cmd, stage=stage)
-
-    # =====================================================
-    # 🔥 VALIDATION
-    # =====================================================
-    if not dense_images_dir.exists():
-        raise RuntimeError(f"{stage}: undistortion failed (no images output)")
-
-    out_images = list(dense_images_dir.glob("*"))
+    out_images = list((dense_dir / "images").glob("*"))
     in_images = list(image_dir.glob("*"))
 
-    num_out = len(out_images)
-    num_in = len(in_images)
+    if not out_images:
+        raise RuntimeError("Undistortion failed: no output images")
 
-    coverage = num_out / max(num_in, 1)
+    coverage = len(out_images) / max(len(in_images), 1)
 
-    logger.info(f"{stage}: output images = {num_out}")
+    logger.info(f"{stage}: output images = {len(out_images)}")
     logger.info(f"{stage}: coverage = {coverage:.2f}")
 
     if coverage < 0.7:
-        logger.warning(f"{stage}: LOW undistortion coverage → downstream holes likely")
+        logger.warning("LOW coverage → reconstruction risk")
     elif coverage < 0.9:
-        logger.info(f"{stage}: acceptable coverage")
+        logger.info("acceptable coverage")
     else:
-        logger.info(f"{stage}: excellent coverage")
-
-    # =====================================================
-    # 🔥 FINAL STRUCTURE CHECK (IMPORTANT)
-    # =====================================================
-    if not dense_sparse_dir.exists():
-        raise RuntimeError(f"{stage}: missing dense/sparse output (invalid workspace)")
+        logger.info("excellent coverage")
 
     logger.info(f"{stage}: SUCCESS")

@@ -19,7 +19,7 @@ def run(paths, config, logger, tool_runner):
     logger.info(f"{stage}: workspace → {mvs_dir}")
 
     # =====================================================
-    # ⚙️ CONFIG
+    # ⚙️ BASE CONFIG
     # =====================================================
     cfg = config.get("dense", {}).get("openmvs", {})
 
@@ -27,58 +27,70 @@ def run(paths, config, logger, tool_runner):
     number_views = cfg.get("number_views", 6)
     cuda_device = cfg.get("cuda_device", 0)
 
-    # 🔥 PIPELINE MODE SWITCH
     pipeline_mode = config.get("pipeline_mode", "default")
+
+    # =====================================================
+    # 🧠 PARAMETER STRATEGIES (ADAPTIVE)
+    # =====================================================
+    STRATEGIES = [
+        # Attempt 1: strict (default / high quality)
+        {
+            "name": "strict",
+            "args": {
+                "--resolution-level": str(resolution),
+                "--number-views": str(number_views),
+                "--number-views-fuse": "3",
+                "--fusion-filter": "2",
+                "--filter-point-cloud": "1",
+                "--estimate-colors": "2",
+                "--estimate-normals": "2",
+            },
+        },
+
+        # Attempt 2: relaxed views + less filtering
+        {
+            "name": "relaxed_views",
+            "args": {
+                "--resolution-level": str(resolution),
+                "--number-views": "4",
+                "--number-views-fuse": "3",
+                "--fusion-filter": "1",
+                "--filter-point-cloud": "0",
+                "--estimate-colors": "2",
+                "--estimate-normals": "2",
+            },
+        },
+
+        # Attempt 3: very robust / fallback
+        {
+            "name": "robust",
+            "args": {
+                "--resolution-level": "0",
+                "--number-views": "3",
+                "--number-views-fuse": "2",
+                "--fusion-filter": "0",
+                "--filter-point-cloud": "0",
+                "--estimate-colors": "2",
+                "--estimate-normals": "2",
+                "--min-resolution": "640",
+            },
+        },
+    ]
 
     # =====================================================
     # 🧠 COMMAND BUILDER
     # =====================================================
-    def build_cmd(device):
+    def build_cmd(device, strategy_args):
         cmd = [
             "DensifyPointCloud",
             "-i", str(scene),
             "-w", str(mvs_dir),
-
             "--cuda-device", str(device),
         ]
 
-        # =================================================
-        # 🚀 PIPELINE D (MAX DETAIL / OPENMVG-FRIENDLY)
-        # =================================================
-        if pipeline_mode == "D":
-            logger.info(f"[{stage}] Using Pipeline D (high detail mode)")
-
-            cmd += [
-                "--resolution-level", "0",        # 🔥 full resolution
-                "--number-views", "8",            # 🔥 more neighbors
-                "--number-views-fuse", "5",
-
-                "--fusion-filter", "0",           # 🔥 NO aggressive filtering
-                "--filter-point-cloud", "0",      # 🔥 keep weak points
-
-                "--estimate-colors", "2",
-                "--estimate-normals", "2",
-
-                "--min-resolution", "640",        # 🔥 prevent over-downscale
-                "--max-resolution", "6000",
-
-                "--sub-resolution-levels", "2",   # 🔥 multi-scale depth
-            ]
-
-        # =================================================
-        # ⚙️ DEFAULT PIPELINE (UNCHANGED)
-        # =================================================
-        else:
-            cmd += [
-                "--resolution-level", str(resolution),
-                "--number-views", str(number_views),
-
-                "--fusion-filter", "2",
-                "--filter-point-cloud", "1",
-                "--estimate-colors", "2",
-                "--estimate-normals", "2",
-                "--number-views-fuse", "3",
-            ]
+        # Add strategy-specific args
+        for k, v in strategy_args.items():
+            cmd += [k, v]
 
         return cmd
 
@@ -107,30 +119,37 @@ def run(paths, config, logger, tool_runner):
         return result.returncode
 
     # =====================================================
-    # 🚀 GPU FIRST
+    # 🚀 ADAPTIVE EXECUTION LOOP
     # =====================================================
-    code = run_process(build_cmd(cuda_device), "GPU")
-
-    # =====================================================
-    # 🔁 CPU FALLBACK
-    # =====================================================
-    if code != 0:
-        logger.warning(f"{stage}: GPU FAILED → retrying on CPU")
-        code = run_process(build_cmd(-2), "CPU")
-
-        if code != 0:
-            raise RuntimeError(
-                f"{stage}: FAILED on BOTH GPU and CPU → check logs above"
-            )
-
-    # =====================================================
-    # ✅ OUTPUT VALIDATION
-    # =====================================================
+    success = False
     dense_scene = mvs_dir / "scene_dense.mvs"
 
-    if not dense_scene.exists() or dense_scene.stat().st_size < 1000:
-        raise RuntimeError(
-            f"{stage}: densify failed → scene_dense.mvs missing or invalid"
-        )
+    for strategy in STRATEGIES:
+        logger.info(f"[{stage}] محاولة strategy = {strategy['name']}")
 
-    logger.info(f"{stage}: SUCCESS → {dense_scene}")
+        # Try GPU first
+        cmd_gpu = build_cmd(cuda_device, strategy["args"])
+        code = run_process(cmd_gpu, f"{strategy['name']}_GPU")
+
+        # GPU fallback to CPU if needed
+        if code != 0:
+            logger.warning(f"{stage}: GPU failed → retry CPU")
+
+            cmd_cpu = build_cmd(-2, strategy["args"])
+            code = run_process(cmd_cpu, f"{strategy['name']}_CPU")
+
+        # Check output
+        if dense_scene.exists() and dense_scene.stat().st_size > 1000 and code == 0:
+            logger.info(f"{stage}: SUCCESS with strategy '{strategy['name']}'")
+            success = True
+            break
+        else:
+            logger.warning(f"{stage}: strategy '{strategy['name']}' failed or weak output")
+
+    # =====================================================
+    # ❌ FINAL FAILURE
+    # =====================================================
+    if not success:
+        raise RuntimeError(f"{stage}: FAILED after all adaptive strategies")
+
+    logger.info(f"{stage}: OUTPUT → {dense_scene}")

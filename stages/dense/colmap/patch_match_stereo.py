@@ -4,7 +4,7 @@ import numpy as np
 
 
 # =====================================================
-# SCENE ANALYSIS (KEEP SIMPLE, DETERMINISTIC)
+# SCENE ANALYSIS (DETERMINISTIC)
 # =====================================================
 def _analyze_scene(num_images):
     return "turntable_object" if num_images <= 60 else "generic"
@@ -27,9 +27,6 @@ def _validate_sparse_model(sparse_dir: Path):
     return False, None
 
 
-# =====================================================
-# ENSURE DENSE/SPARSE CONSISTENCY
-# =====================================================
 def _ensure_dense_sparse(paths, logger):
     dense_sparse = paths.dense / "sparse"
 
@@ -47,106 +44,93 @@ def _ensure_dense_sparse(paths, logger):
 
 
 # =====================================================
-# PARAM BUILDERS (DENSIFICATION-OPTIMIZED)
+# PARAM BUILDERS
 # =====================================================
-def _build_turntable_params():
+
+# -------- PASS 1: STABILITY (STRICT, LOW VARIANCE) ----
+def _build_stable_params():
     return {
-        # -------------------------------
-        # IMAGE HANDLING
-        # -------------------------------
-        "max_image_size": 2000,
+        "max_image_size": 1600,
 
-        # -------------------------------
-        # CORE PATCHMATCH (KEY DENSITY LEVER)
-        # -------------------------------
-        "window_radius": 5,        # ⬆ better surface continuity
+        "window_radius": 4,
         "window_step": 1,
-        "num_samples": 18,         # ⬆ more hypotheses (MAIN densifier)
-        "num_iterations": 5,       # keep bounded
-
-        # -------------------------------
-        # PHOTOMETRIC MATCHING
-        # -------------------------------
-        "sigma_spatial": -1,
-        "sigma_color": 0.25,       # slightly more tolerant
-        "ncc_sigma": 0.55,         # allow harder surfaces
-
-        # -------------------------------
-        # GEOMETRY (DO NOT OVER-RELAX)
-        # -------------------------------
-        "min_triangulation_angle": 4,
-        "incident_angle_sigma": 0.9,
-
-        # -------------------------------
-        # GEOMETRIC CONSISTENCY (CRITICAL)
-        # -------------------------------
-        "geom_consistency": 1,
-        "geom_consistency_regularizer": 0.5,
-        "geom_consistency_max_cost": 2,
-
-        # -------------------------------
-        # FILTERING (CONTROLLED RELAXATION)
-        # -------------------------------
-        "filter": 1,
-        "filter_min_ncc": 0.12,                 # ⬇ admit more points
-        "filter_min_triangulation_angle": 3,
-        "filter_min_num_consistent": 2,         # ⬇ allow weaker agreement
-        "filter_geom_consistency_max_cost": 2,
-
-        # -------------------------------
-        # PERFORMANCE
-        # -------------------------------
-        "cache_size": 64,
-    }
-
-
-def _build_generic_params():
-    return {
-        "max_image_size": 2000,
-
-        "window_radius": 6,
-        "window_step": 1,
-        "num_samples": 18,
-        "num_iterations": 5,
+        "num_samples": 10,
+        "num_iterations": 4,
 
         "sigma_spatial": -1,
-        "sigma_color": 0.3,
-        "ncc_sigma": 0.6,
+        "sigma_color": 0.2,
+        "ncc_sigma": 0.5,
 
-        "min_triangulation_angle": 2,
-        "incident_angle_sigma": 1.0,
+        "min_triangulation_angle": 6,
+        "incident_angle_sigma": 0.8,
 
         "geom_consistency": 1,
-        "geom_consistency_regularizer": 0.4,
-        "geom_consistency_max_cost": 3,
+        "geom_consistency_regularizer": 0.7,
+        "geom_consistency_max_cost": 1,
 
+        # STRICT FILTERING
         "filter": 1,
-        "filter_min_ncc": 0.10,
-        "filter_min_triangulation_angle": 2,
-        "filter_min_num_consistent": 2,
-        "filter_geom_consistency_max_cost": 2,
+        "filter_min_ncc": 0.2,
+        "filter_min_triangulation_angle": 5,
+        "filter_min_num_consistent": 3,
+        "filter_geom_consistency_max_cost": 1,
 
         "cache_size": 32,
     }
 
 
-# =====================================================
-# PARAM SELECTOR
-# =====================================================
-def _build_params(scene_type):
-    return _build_turntable_params() if scene_type == "turntable_object" else _build_generic_params()
+# -------- PASS 2: DENSIFICATION (CONTROLLED RELAX) ----
+def _build_dense_params(scene_type):
+    base = {
+        "max_image_size": 2000,
+
+        "window_radius": 5,
+        "window_step": 1,
+        "num_samples": 14,
+        "num_iterations": 4,
+
+        "sigma_spatial": -1,
+        "sigma_color": 0.25,
+        "ncc_sigma": 0.6,
+
+        "min_triangulation_angle": 4,
+        "incident_angle_sigma": 0.9,
+
+        "geom_consistency": 1,
+        "geom_consistency_regularizer": 0.5,
+        "geom_consistency_max_cost": 2,
+
+        # RELAXED BUT SAFE
+        "filter": 1,
+        "filter_min_ncc": 0.14,
+        "filter_min_triangulation_angle": 3,
+        "filter_min_num_consistent": 2,
+        "filter_geom_consistency_max_cost": 2,
+
+        "cache_size": 64,
+    }
+
+    if scene_type == "turntable_object":
+        base["window_radius"] = 5
+    else:
+        base["window_radius"] = 6
+
+    return base
 
 
 # =====================================================
 # COMMAND BUILDER
 # =====================================================
-def _build_cmd(dense_dir, params, gpu=True):
+def _build_cmd(dense_dir, params, gpu=True, threads=None):
     cmd = [
         "colmap", "patch_match_stereo",
         "--workspace_path", str(dense_dir),
         "--workspace_format", "COLMAP",
         "--PatchMatchStereo.gpu_index", "0" if gpu else "-1",
     ]
+
+    if not gpu and threads:
+        cmd += ["--PatchMatchStereo.num_threads", str(threads)]
 
     for k, v in params.items():
         cmd.append(f"--PatchMatchStereo.{k}")
@@ -156,7 +140,7 @@ def _build_cmd(dense_dir, params, gpu=True):
 
 
 # =====================================================
-# DEPTH LOADER
+# DEPTH METRIC
 # =====================================================
 def _load_depth(path):
     try:
@@ -166,9 +150,6 @@ def _load_depth(path):
         return None
 
 
-# =====================================================
-# COVERAGE METRIC (IMPORTANT FEEDBACK SIGNAL)
-# =====================================================
 def _compute_coverage(depth_dir: Path):
     total_valid = 0
     total_pixels = 0
@@ -186,65 +167,84 @@ def _compute_coverage(depth_dir: Path):
 
 
 # =====================================================
+# EXECUTION WRAPPER
+# =====================================================
+def _run_patchmatch(tool_runner, cmd, stage, logger):
+    logger.info(f"Running: {stage}")
+    tool_runner.run(cmd, stage=stage)
+
+
+# =====================================================
 # MAIN
 # =====================================================
 def run(paths, config, logger, tool_runner):
-    stage = "patch_match_densified_v3"
-    logger.info(f"---- {stage.upper()} ----")
+    stage = "patch_match_dual_pass"
+    logger.info(f"==== {stage.upper()} ====")
 
     dense_dir = paths.dense
     _ensure_dense_sparse(paths, logger)
 
     num_images = len(list(paths.images.glob("*")))
-    logger.info(f"Images detected: {num_images}")
-
-    # -----------------------------
-    # SCENE TYPE
-    # -----------------------------
     scene_type = _analyze_scene(num_images)
-    logger.info(f"Scene type: {scene_type}")
 
-    # -----------------------------
-    # PARAMS
-    # -----------------------------
-    params = _build_params(scene_type)
-    logger.info(f"Params: {params}")
+    logger.info(f"Images: {num_images}")
+    logger.info(f"Scene: {scene_type}")
 
-    # -----------------------------
-    # EXECUTION
-    # -----------------------------
+    depth_dir = dense_dir / "stereo" / "depth_maps"
+
+    # =================================================
+    # PASS 1 — STABILITY (CPU, DETERMINISTIC BASE)
+    # =================================================
+    stable_params = _build_stable_params()
+
     try:
-        tool_runner.run(
-            _build_cmd(dense_dir, params, gpu=True),
-            stage=stage + "_gpu"
+        _run_patchmatch(
+            tool_runner,
+            _build_cmd(dense_dir, stable_params, gpu=False, threads=1),
+            stage + "_pass1_stable_cpu",
+            logger
         )
     except Exception as e:
-        logger.warning(f"GPU failed → CPU fallback: {e}")
+        logger.warning(f"Stable pass CPU failed → GPU fallback: {e}")
 
-        tool_runner.run(
-            _build_cmd(dense_dir, params, gpu=False),
-            stage=stage + "_cpu"
+        _run_patchmatch(
+            tool_runner,
+            _build_cmd(dense_dir, stable_params, gpu=True),
+            stage + "_pass1_stable_gpu",
+            logger
         )
 
-    # -----------------------------
-    # QUALITY CHECK
-    # -----------------------------
-    depth_dir = dense_dir / "stereo" / "depth_maps"
-    score = _compute_coverage(depth_dir)
+    coverage1 = _compute_coverage(depth_dir)
+    logger.info(f"[PASS 1] Coverage: {coverage1:.2f}%")
 
-    logger.info(f"Depth coverage: {score:.2f}%")
+    # =================================================
+    # PASS 2 — DENSIFICATION (GPU REFINEMENT)
+    # =================================================
+    dense_params = _build_dense_params(scene_type)
 
-    # -----------------------------
-    # SANITY FLAGGING
-    # -----------------------------
-    if score < 5:
-        logger.warning("⚠️ Extremely low coverage → likely failure")
-    elif score > 60:
-        logger.info("High density achieved (good candidate for pruning)")
+    _run_patchmatch(
+        tool_runner,
+        _build_cmd(dense_dir, dense_params, gpu=True),
+        stage + "_pass2_dense_gpu",
+        logger
+    )
+
+    coverage2 = _compute_coverage(depth_dir)
+    logger.info(f"[PASS 2] Coverage: {coverage2:.2f}%")
+
+    # =================================================
+    # QUALITY LOGIC
+    # =================================================
+    if coverage2 < coverage1:
+        logger.warning("⚠️ Densification reduced quality → check params")
+
+    if coverage2 > 60:
+        logger.info("High density achieved (ready for pruning stage)")
 
     return {
         "status": "complete",
-        "quality_score": score,
+        "pass1_coverage": coverage1,
+        "pass2_coverage": coverage2,
         "images": num_images,
         "scene_type": scene_type
     }

@@ -4,6 +4,10 @@ import shutil
 from core.runner import PipelineRunner
 from config.config_manager import load_config
 
+
+# =====================================================
+# CONSTANTS
+# =====================================================
 VALID_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
 
@@ -12,7 +16,7 @@ def is_valid_image(file: Path):
 
 
 # =====================================================
-# INPUT
+# INPUT HANDLING
 # =====================================================
 def get_user_paths():
     print("=== Photogrammetry Pipeline Setup ===")
@@ -30,6 +34,7 @@ def get_user_paths():
     if not copy_enabled:
         return project_root, input_path
 
+    # Clean existing
     if raw_images_dir.exists():
         shutil.rmtree(raw_images_dir)
 
@@ -48,7 +53,7 @@ def get_user_paths():
 
 
 # =====================================================
-# PIPELINE CHOICE
+# PIPELINE SELECTION
 # =====================================================
 def get_pipeline_choice():
     print("\n=== Pipeline Selection ===")
@@ -56,14 +61,14 @@ def get_pipeline_choice():
     print("B → GLOMAP + COLMAP dense")
     print("C → COLMAP + OpenMVS")
     print("D → OpenMVG (SfM only)")
-    print("E → COLMAP + GSPLAT (Neural Reconstruction)")
+    print("E → COLMAP + Nerfstudio (Neural Reconstruction)")
 
     choice = input("Select pipeline [A]: ").strip().upper()
     return choice if choice in ["A", "B", "C", "D", "E"] else "A"
 
 
 # =====================================================
-# CONFIG
+# CONFIG BUILDER
 # =====================================================
 def get_user_config(project_root: Path, image_source: Path, pipeline_choice: str):
 
@@ -95,20 +100,25 @@ def get_user_config(project_root: Path, image_source: Path, pipeline_choice: str
         }
 
     elif pipeline_choice == "E":
+        # 🔥 NERFSTUDIO PIPELINE
         user_config.setdefault("pipeline", {})
         user_config["pipeline"]["backends"] = {
             "sparse": "colmap",
-            "dense": None,        # ❌ disabled
-            "mesh": "gsplat",     # 🔥 gsplat takes over
+            "dense": "nerfstudio",   # ✅ CORRECT
+            "mesh": "colmap",        # optional mesh post-process
             "texture": None
         }
 
-        # Optional: tweak gsplat params here
-        user_config["mesh"] = {
-            "gsplat": {
-                "iterations": 15000,   # faster testing
-                "extract_resolution": 256,
-                "density_thresh": 0.5
+        # 🔥 Nerfstudio config (aligned with your new config system)
+        user_config.setdefault("dense", {})
+        user_config["dense"]["nerfstudio"] = {
+            "method": "splatfacto",
+            "iterations": 15000,   # faster for testing
+            "use_gpu": True,
+            "use_downsampled": True,
+            "export": {
+                "type": "pointcloud",
+                "resolution": 512
             }
         }
 
@@ -116,7 +126,7 @@ def get_user_config(project_root: Path, image_source: Path, pipeline_choice: str
 
 
 # =====================================================
-# MAIN
+# MAIN ENTRY
 # =====================================================
 if __name__ == "__main__":
     try:
