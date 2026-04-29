@@ -1,250 +1,329 @@
 #!/usr/bin/env python3
 """
-MARK-2 Visualization (Robust V3 - Interpretable)
-------------------------------------------------
-Enhancements:
-✔ Larger spider chart (readable for many models)
-✔ Explicit legends placed outside (no overlap)
-✔ Auto scaling (linear/log)
-✔ Clear semantic labeling of metrics
-✔ Color meaning explained in titles
-✔ Consistent evaluator schema
+MARK-2 Visualization (v27 - Clean Rewrite)
+------------------------------------------
+✔ Upright pentagon radar preserved
+✔ Legend safely pushed below (no overlap guaranteed)
+✔ Cleaner modular structure
+✔ Stable color + normalization system
+✔ Paper-ready outputs
 """
 
 import json
-import argparse
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
-try:
-    import seaborn as sns
-    SEABORN_AVAILABLE = True
-except ImportError:
-    SEABORN_AVAILABLE = False
+DPI = 300
 
 
 # =====================================================
-# LOAD
+# 🎨 COLOR SYSTEM
 # =====================================================
-def load_results(path):
-    with open(path, "r") as f:
-        return json.load(f)
+COLOR_MAP = {
+    "colmap": "#1f77b4",
+    "openmvs": "#2ca02c",
+    "openmvg": "#ff7f0e",
+    "nerf": "#d62728",
+    "hybrid": "#9467bd",
+    "default": "#4c4c4c"
+}
+
+
+def get_color(name: str) -> str:
+    name = name.lower()
+    for k, v in COLOR_MAP.items():
+        if k in name:
+            return v
+    return COLOR_MAP["default"]
+
+
+def build_legend(models):
+    return [
+        Line2D(
+            [0], [0],
+            marker='o',
+            color='w',
+            label=m,
+            markerfacecolor=get_color(m),
+            markersize=8
+        )
+        for m in models
+    ]
 
 
 # =====================================================
-# AUTO SCALE
+# IO
 # =====================================================
-def auto_scale(ax, values, ylabel):
-    if not values:
-        return "linear"
+def load_json(path: str):
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(path)
 
-    v = np.array(values, dtype=float)
-    v = v[np.isfinite(v)]
+    return json.loads(path.read_text(encoding="utf-8"))
 
-    if len(v) == 0:
-        return "linear"
 
-    ratio = (np.max(v) + 1e-12) / (np.min(v) + 1e-12)
-
-    if ratio > 1e3:
-        ax.set_yscale("log")
-        ax.set_ylabel(ylabel + " (log scale)")
-        return "log"
-    else:
-        ax.set_ylabel(ylabel + " (linear scale)")
-        return "linear"
+def get_models(data):
+    return data["per_model_metrics"]
 
 
 # =====================================================
-# NORMALIZE
+# FEATURE SPACE
 # =====================================================
-def normalize(d, invert=False):
-    if not d:
-        return {}
+def build_axes(m):
+    return {
+        "Accuracy": 1.0 / (1.0 + m.get("accuracy_mean", 1.0)),
+        "Completeness": 1.0 / (1.0 + m.get("completeness_mean", 1.0)),
+        "Surface": 1.0 / (1.0 + m.get("chamfer_distance", 1.0)),
+        "ICP": m.get("icp_fitness", 0.0),
+        "Coverage": m.get("coverage_ratio", 0.0),
+    }
 
-    vals = np.array(list(d.values()), dtype=float)
-    mn, mx = np.min(vals), np.max(vals)
 
-    if abs(mx - mn) < 1e-8:
-        return {k: 0.5 for k in d}
+def normalize(data):
+    keys = list(next(iter(data.values())).keys())
+    out = {m: {} for m in data}
 
-    out = {}
-    for k, v in d.items():
-        x = (v - mn) / (mx - mn)
-        out[k] = 1 - x if invert else x
+    for k in keys:
+        vals = np.array([data[m][k] for m in data], dtype=float)
+
+        vmin, vmax = vals.min(), vals.max()
+
+        if abs(vmax - vmin) < 1e-8:
+            scaled = np.full_like(vals, 0.5)
+        else:
+            scaled = (vals - vmin) / (vmax - vmin)
+
+        for i, m in enumerate(data):
+            out[m][k] = float(scaled[i])
+
     return out
 
 
-# =====================================================
-# BUILD MATRIX
-# =====================================================
-def build_matrix(pairwise, key):
-    models = sorted({m for k in pairwise for m in k.split("__vs__")})
-    idx = {m: i for i, m in enumerate(models)}
-    mat = np.zeros((len(models), len(models)))
-
-    for k, v in pairwise.items():
-        if key not in v:
-            continue
-        a, b = k.split("__vs__")
-        i, j = idx[a], idx[b]
-        mat[i, j] = mat[j, i] = float(v[key])
-
-    return models, mat
-
-
-# =====================================================
-# HEATMAP
-# =====================================================
-def plot_heatmap(models, matrix, title, out):
-    if len(models) == 0:
-        return
-
-    plt.figure(figsize=(12, 10))
-
-    if SEABORN_AVAILABLE:
-        sns.heatmap(matrix,
-                    xticklabels=models,
-                    yticklabels=models,
-                    cmap="viridis",
-                    square=True,
-                    cbar_kws={"label": "Distance (lower = better)"})
-    else:
-        im = plt.imshow(matrix)
-        plt.colorbar(im, label="Distance (lower = better)")
-        plt.xticks(range(len(models)), models, rotation=90)
-        plt.yticks(range(len(models)), models)
-
-    plt.title(title + "\nColor Meaning: Dark = Similar (Good), Bright = Dissimilar (Bad)")
-    plt.tight_layout()
-    plt.savefig(out)
-    plt.close()
-
-
-# =====================================================
-# BAR
-# =====================================================
-def plot_bar(data, ylabel, title, out, better="lower"):
-    if not data:
-        return
-
-    names = list(data.keys())
-    values = list(data.values())
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    ax.bar(names, values)
-    plt.xticks(rotation=90)
-
-    scale_type = auto_scale(ax, values, ylabel)
-
-    meaning = "Lower = Better" if better == "lower" else "Higher = Better"
-    ax.set_title("Multi-Metric Comparison", pad=20)
-
-    # Legend block (outside)
-    ax.legend([f"Metric scale: {scale_type}"], loc="center left", bbox_to_anchor=(1, 0.5))
-
-    plt.tight_layout(rect=[0, 0, 0.8, 1])
-    plt.savefig(out)
-    plt.close()
-
-
-# =====================================================
-# SPIDER (LARGER + CLEAR)
-# =====================================================
-def plot_spider(metrics, out):
-    if not metrics:
-        return
-
-    labels = list(next(iter(metrics.values())).keys())
-    n = len(labels)
-
-    angles = np.linspace(0, 2*np.pi, n, endpoint=False).tolist()
-    angles += angles[:1]
-
-    fig = plt.figure(figsize=(12, 12))  # LARGER
-    ax = plt.subplot(111, polar=True)
-
-    for name, vals in metrics.items():
-        v = list(vals.values())
-        v += v[:1]
-        ax.plot(angles, v, label=name)
-        ax.fill(angles, v, alpha=0.08)
-
-    ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(labels)
-    ax.set_ylim(0, 1)
-
-    ax.set_title(
-        "Multi-Metric Comparison\n"
-        "Interpretation:\n"
-        "- All values normalized to [0,1]\n"
-        "- Higher = Better (after inversion where needed)\n"
-        "- Larger area = better overall model",
-        pad=30
+def sort_models(models):
+    return sorted(
+        models.keys(),
+        key=lambda m: models[m].get("fscore", 0.0),
+        reverse=True
     )
 
-    ax.legend(loc="center left", bbox_to_anchor=(1.2, 0.5))
 
-    plt.tight_layout(rect=[0, 0, 0.75, 1])
-    plt.savefig(out)
+# =====================================================
+# RADAR GEOMETRY
+# =====================================================
+def radar_xy(values):
+    n = len(values)
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False) + np.pi / 2
+
+    x = values * np.cos(angles)
+    y = values * np.sin(angles)
+
+    return np.append(x, x[0]), np.append(y, y[0])
+
+
+def draw_grid(ax, n):
+    base = np.linspace(0, 2 * np.pi, n, endpoint=False) + np.pi / 2
+
+    for r in [0.2, 0.4, 0.6, 0.8]:
+        xs = r * np.cos(base)
+        ys = r * np.sin(base)
+        ax.plot(np.append(xs, xs[0]), np.append(ys, ys[0]),
+                color="#777", alpha=0.35, linewidth=0.9)
+
+    xs = np.cos(base)
+    ys = np.sin(base)
+    ax.plot(np.append(xs, xs[0]), np.append(ys, ys[0]),
+            color="#222", linewidth=2.4)
+
+    for a in base:
+        ax.plot([0, np.cos(a)], [0, np.sin(a)],
+                color="#888", alpha=0.25, linewidth=0.8)
+
+
+# =====================================================
+# 🕸️ RADAR PLOT (ONLY LEGEND POSITION ADJUSTED)
+# =====================================================
+def plot_radar(per_model, out_path):
+    models = sort_models(per_model)
+
+    semantic = {m: build_axes(per_model[m]) for m in models}
+    norm = normalize(semantic)
+
+    labels = list(next(iter(norm.values())).keys())
+    angles = len(labels)
+
+    fig, ax = plt.subplots(figsize=(9, 9), facecolor="#f5f1ea")
+    ax.set_facecolor("#f5f1ea")
+    ax.set_aspect("equal")
+
+    draw_grid(ax, angles)
+
+    base_angles = np.linspace(0, 2 * np.pi, angles, endpoint=False) + np.pi / 2
+
+    for m in models:
+        vals = np.array(list(norm[m].values()))
+        x, y = radar_xy(vals)
+
+        c = get_color(m)
+        ax.plot(x, y, linewidth=2, color=c)
+        ax.fill(x, y, alpha=0.12, color=c)
+
+    for i, lab in enumerate(labels):
+        ax.text(
+            1.15 * np.cos(base_angles[i]),
+            1.15 * np.sin(base_angles[i]),
+            lab,
+            ha="center",
+            va="center",
+            fontsize=11
+        )
+
+    for r in [0.2, 0.4, 0.6, 0.8, 1.0]:
+        ax.text(0, r, f"{r:.1f}", fontsize=9, ha="center", color="#444")
+
+    ax.axis("off")
+
+    plt.title(
+        "Reconstruction Quality (MARK-2 v27)",
+        fontsize=14,
+        fontweight="bold",
+        pad=20
+    )
+
+    # 🔥 ONLY CHANGE: moved legend further down
+    fig.legend(
+        handles=build_legend(models),
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.08),   # was -0.02 → now lower
+        ncol=3,
+        frameon=False
+    )
+
+    plt.subplots_adjust(bottom=0.12)  # slightly more breathing room
+
+    plt.savefig(out_path, dpi=DPI, bbox_inches="tight")
     plt.close()
 
 
 # =====================================================
-# MAIN
+# BAR PLOT (UNCHANGED)
 # =====================================================
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True)
-    parser.add_argument("--output_dir", required=True)
-    args = parser.parse_args()
+def plot_fscore(per_model, out_path):
+    models = sort_models(per_model)
 
-    data = load_results(args.input)
+    scores = [per_model[m].get("fscore", 0) for m in models]
+    colors = [get_color(m) for m in models]
 
-    pairwise = data.get("pairwise", {})
-    per_model = data.get("per_model", {})
+    fig, ax = plt.subplots(figsize=(8, 4), facecolor="#f5f1ea")
 
-    out = Path(args.output_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    ax.bar(models, scores, color=colors, edgecolor="#333", linewidth=0.5)
+    ax.set_title("F-score Ranking")
+    ax.set_ylabel("Score")
+    ax.grid(axis="y", alpha=0.2)
 
-    # Heatmaps
-    models, chamfer = build_matrix(pairwise, "chamfer_mean")
-    _, icp = build_matrix(pairwise, "icp_rmse")
+    plt.xticks(rotation=15)
+    plt.tight_layout()
 
-    plot_heatmap(models, chamfer, "Chamfer Distance Heatmap", out / "chamfer.png")
-    plot_heatmap(models, icp, "ICP RMSE Heatmap", out / "icp.png")
-
-    # Bars
-    dispersion = {m: v.get("projection_dispersion", 0) for m, v in per_model.items()}
-    points = {m: v.get("num_points", 0) for m, v in per_model.items()}
-
-    plot_bar(dispersion, "Projection Dispersion", "Projection Stability", out / "dispersion.png", better="lower")
-    plot_bar(points, "Point Count", "Reconstruction Density", out / "points.png", better="higher")
-
-    # Spider
-    chamfer_avg = {m: float(np.mean(chamfer[i])) for i, m in enumerate(models)} if len(models) else {}
-    icp_avg = {m: float(np.mean(icp[i])) for i, m in enumerate(models)} if len(models) else {}
-
-    c_n = normalize(chamfer_avg, invert=True)
-    i_n = normalize(icp_avg, invert=True)
-    d_n = normalize(dispersion, invert=True)
-
-    common = set(c_n) & set(i_n) & set(d_n)
-
-    spider = {
-        m: {
-            "Chamfer (shape similarity)": c_n[m],
-            "ICP (alignment quality)": i_n[m],
-            "Dispersion (projection stability)": d_n[m]
-        }
-        for m in common
-    }
-
-    plot_spider(spider, out / "spider.png")
-
-    print(f"[INFO] Saved visualizations → {out}")
+    plt.savefig(out_path, dpi=DPI)
+    plt.close()
 
 
+# =====================================================
+# ICP PLOT (UNCHANGED)
+# =====================================================
+def plot_icp(per_model, out_path):
+    fig, ax = plt.subplots(figsize=(6, 5), facecolor="#f5f1ea")
+
+    for m, v in per_model.items():
+        ax.scatter(
+            v.get("icp_rmse", 0),
+            v.get("icp_fitness", 0),
+            s=120,
+            color=get_color(m),
+            edgecolor="#333"
+        )
+
+    ax.set_title("ICP Alignment Quality")
+    ax.set_xlabel("ICP RMSE")
+    ax.set_ylabel("ICP Fitness")
+    ax.grid(alpha=0.25)
+
+    fig.legend(
+        handles=build_legend(per_model.keys()),
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.08),  # moved slightly lower
+        ncol=3,
+        frameon=False
+    )
+
+    plt.subplots_adjust(bottom=0.12)
+    plt.savefig(out_path, dpi=DPI, bbox_inches="tight")
+    plt.close()
+
+
+# =====================================================
+# TRADEOFF PLOT (UNCHANGED)
+# =====================================================
+def plot_tradeoff(per_model, out_path):
+    fig, ax = plt.subplots(figsize=(6, 5), facecolor="#f5f1ea")
+
+    for m, v in per_model.items():
+        ax.scatter(
+            v.get("accuracy_mean", 0),
+            v.get("coverage_ratio", 0),
+            s=120,
+            color=get_color(m),
+            edgecolor="#333"
+        )
+
+    ax.set_title("Accuracy–Coverage Tradeoff")
+    ax.set_xlabel("Accuracy")
+    ax.set_ylabel("Coverage")
+    ax.grid(alpha=0.25)
+
+    fig.legend(
+        handles=build_legend(per_model.keys()),
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.08),  # moved slightly lower
+        ncol=3,
+        frameon=False
+    )
+
+    plt.subplots_adjust(bottom=0.12)
+    plt.savefig(out_path, dpi=DPI, bbox_inches="tight")
+    plt.close()
+
+
+# =====================================================
+# PIPELINE
+# =====================================================
+def run(path):
+    data = load_json(path)
+    per_model = get_models(data)
+
+    out_dir = Path(path).parent / "viz_v27"
+    out_dir.mkdir(exist_ok=True)
+
+    print(f"\n[INFO] Models: {len(per_model)}")
+    print(f"[INFO] Output: {out_dir}")
+
+    plot_radar(per_model, out_dir / "radar.png")
+    plot_fscore(per_model, out_dir / "fscore.png")
+    plot_icp(per_model, out_dir / "icp.png")
+    plot_tradeoff(per_model, out_dir / "tradeoff.png")
+
+    print("[INFO] Done.")
+
+
+# =====================================================
+# ENTRY
+# =====================================================
 if __name__ == "__main__":
-    main()
+    print("\n=== MARK-2 Visualization v27 (Adjusted Legend) ===")
+    p = input("Enter results.json path: ").strip()
+
+    if not Path(p).exists():
+        raise FileNotFoundError(p)
+
+    run(p)

@@ -11,7 +11,10 @@ from PIL import Image
 def run(run_root: Path, project_root: Path, force: bool, logger):
     stage = "openmvg_reconstruction"
 
-    paths = ProjectPaths(project_root, run_root.name)
+    # =====================================================
+    # ✅ SINGLE SOURCE OF PATHS
+    # =====================================================
+    paths = ProjectPaths(run_root)
     tool = ToolRunner(logger)
 
     config = load_config()
@@ -26,9 +29,9 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     sensor_db = cfg.get("sensor_database")
     focal_multiplier = cfg.get("fallback_focal_multiplier", 1.2)
 
-    # --------------------------------------------------
+    # =====================================================
     # CLEAN START
-    # --------------------------------------------------
+    # =====================================================
     if matches_dir.exists():
         shutil.rmtree(matches_dir)
     if reconstruction_dir.exists():
@@ -42,18 +45,18 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
 
     logger.info(f"[{stage}] Starting OpenMVG pipeline")
 
-    # --------------------------------------------------
+    # =====================================================
     # PREPARE FALLBACK FOCAL
-    # --------------------------------------------------
+    # =====================================================
     first_image = next(input_images.glob("*.*"))
     with Image.open(first_image) as img:
         width, height = img.size
 
     fallback_focal = focal_multiplier * max(width, height)
 
-    # --------------------------------------------------
-    # 1. IMAGE LISTING (ROBUST INTRINSICS)
-    # --------------------------------------------------
+    # =====================================================
+    # 1. IMAGE LISTING
+    # =====================================================
     def run_listing(use_sensor_db=True):
         cmd = [
             "openMVG_main_SfMInit_ImageListing",
@@ -95,31 +98,31 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
 
     logger.info(f"[{stage}] ✅ Intrinsics OK")
 
-    # --------------------------------------------------
-    # 2. FEATURE EXTRACTION (MAX DETAIL)
-    # --------------------------------------------------
+    # =====================================================
+    # 2. FEATURE EXTRACTION
+    # =====================================================
     tool.run(
         [
             "openMVG_main_ComputeFeatures",
             "-i", str(sfm_json),
             "-o", str(matches_dir),
             "-m", "SIFT",
-            "-p", "ULTRA",   # 🔥 max detail
+            "-p", "ULTRA",
             "-f", "1"
         ],
         stage=stage
     )
 
-    # --------------------------------------------------
-    # 3. FEATURE MATCHING (MAX PERMISSIVE)
-    # --------------------------------------------------
+    # =====================================================
+    # 3. FEATURE MATCHING
+    # =====================================================
     tool.run(
         [
             "openMVG_main_ComputeMatches",
             "-i", str(sfm_json),
             "-o", str(matches_dir),
             "-n", "ANNL2",
-            "-g", "f",   # 🔥 fundamental (more permissive)
+            "-g", "f",
             "--guided_matching", "1",
             "--ratio", "0.95",
             "-f", "1"
@@ -127,9 +130,9 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
         stage=stage
     )
 
-    # --------------------------------------------------
-    # MATCH DETECTION
-    # --------------------------------------------------
+    # =====================================================
+    # MATCH VALIDATION
+    # =====================================================
     match_candidates = [
         matches_dir / "matches.f.bin",
         matches_dir / "matches.e.bin",
@@ -149,11 +152,9 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
 
     logger.info(f"[{stage}] ✅ Matches OK → {match_file.name}")
 
-    # --------------------------------------------------
-    # 4. INCREMENTAL SFM FIRST (KEY CHANGE)
-    # --------------------------------------------------
-    logger.info(f"[{stage}] Running Incremental SfM (primary)")
-
+    # =====================================================
+    # 4. INCREMENTAL SFM
+    # =====================================================
     tool.run(
         [
             "openMVG_main_IncrementalSfM",
@@ -167,11 +168,11 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     def is_valid():
         return sfm_bin.exists() and sfm_bin.stat().st_size > 20000
 
-    # --------------------------------------------------
-    # 5. FALLBACK TO GLOBAL
-    # --------------------------------------------------
+    # =====================================================
+    # 5. GLOBAL FALLBACK
+    # =====================================================
     if not is_valid():
-        logger.warning(f"[{stage}] Incremental weak → trying Global")
+        logger.warning(f"[{stage}] Incremental weak → Global SfM")
 
         shutil.rmtree(reconstruction_dir)
         reconstruction_dir.mkdir(parents=True, exist_ok=True)
@@ -194,9 +195,9 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
 
     logger.info(f"[{stage}] ✅ SfM reconstruction OK")
 
-    # --------------------------------------------------
-    # 6. MAX STRUCTURE DENSIFICATION
-    # --------------------------------------------------
+    # =====================================================
+    # 6. STRUCTURE REFINEMENT (OPTIONAL BUT GOOD)
+    # =====================================================
     dense_bin = reconstruction_dir / "dense.bin"
 
     tool.run(
@@ -211,36 +212,16 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
 
     if dense_bin.exists():
         sfm_bin = dense_bin
-        logger.info(f"[{stage}] Using dense structure")
+        logger.info(f"[{stage}] Using refined structure")
 
-    # --------------------------------------------------
-    # 7. EXPORT TO OPENMVS
-    # --------------------------------------------------
-    mvs_dir = reconstruction_dir / "openmvs"
-    mvs_dir.mkdir(exist_ok=True)
-
-    tool.run(
-        [
-            "openMVG_main_openMVG2openMVS",
-            "-i", str(sfm_bin),
-            "-o", str(mvs_dir / "scene.mvs"),
-            "-d", str(mvs_dir)
-        ],
-        stage=stage
-    )
-
-    mvs_scene = mvs_dir / "scene.mvs"
-
-    if not mvs_scene.exists():
-        raise RuntimeError(f"[{stage}] ❌ OpenMVS export failed")
-
-    logger.info(f"[{stage}] ✅ OpenMVS export OK")
-    logger.info(f"[{stage}] DONE")
+    # =====================================================
+    # ✅ FINAL OUTPUT (NO OPENMVS HERE)
+    # =====================================================
+    logger.info(f"[{stage}] DONE (SfM only)")
 
     return {
         "sfm_data": sfm_bin,
         "matches_dir": matches_dir,
         "reconstruction_dir": reconstruction_dir,
-        "mvs_scene": mvs_scene,
         "match_file_used": match_file.name
     }

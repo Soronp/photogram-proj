@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-MARK-2 Evaluator (Robust v2)
----------------------------------
-Improvements:
-✔ Deterministic sampling
-✔ Symmetric Chamfer Distance
-✔ ICP fitness + RMSE
-✔ Bounding-box scale normalization
-✔ Clear metric naming
-✔ Structured + explainable JSON output
-✔ Separation of geometry + image proxies
+MARK-2 Evaluator (v12 - Dual Mode: GT + GT-Free)
+------------------------------------------------
+✔ GT-based evaluation (true geometry)
+✔ GT-free relative evaluation (consensus-based)
+✔ Identical metric schema across modes
+✔ Stable F-score (scale-aware)
+✔ Robust coverage (distribution-based)
+✔ Paper-aligned outputs
 """
 
 import open3d as o3d
@@ -17,40 +15,40 @@ import numpy as np
 from pathlib import Path
 import json
 import sys
-import struct
-import subprocess
 
-# ==============================
-# CONFIG
-# ==============================
-THRESHOLD = 0.01
 EPS = 1e-8
 MAX_POINTS = 120000
-SEED = 42
+np.random.seed(42)
 
-np.random.seed(SEED)
 
 # ==============================
 # INPUT
 # ==============================
 def ask_user():
-    print("\n=== MARK-2 Evaluator (Robust v2) ===")
+    print("\n=== MARK-2 Evaluator (v12 Dual Mode) ===")
 
     ply_folder = Path(input("PLY folder: ").strip())
-    sparse_model = Path(input("COLMAP sparse model: ").strip())
-    output = Path(input("Output JSON: ").strip())
+    gt_input = input("Ground truth PLY (leave empty for GT-free): ").strip()
+    output = Path(input("Output JSON file: ").strip())
 
-    if not ply_folder.exists() or not sparse_model.exists():
-        print("[ERROR] Invalid paths")
+    if not ply_folder.exists():
+        print("[ERROR] Invalid PLY folder")
+        sys.exit(1)
+
+    gt_path = Path(gt_input) if gt_input else None
+
+    if gt_path and not gt_path.exists():
+        print("[ERROR] Invalid GT path")
         sys.exit(1)
 
     if output.suffix != ".json":
         output = output.with_suffix(".json")
 
-    return ply_folder, sparse_model, output
+    return ply_folder, gt_path, output.resolve()
+
 
 # ==============================
-# SAMPLING
+# UTIL
 # ==============================
 def downsample(pts):
     if len(pts) > MAX_POINTS:
@@ -58,226 +56,200 @@ def downsample(pts):
         return pts[idx]
     return pts
 
-# ==============================
-# LOAD PLY
-# ==============================
+
 def load_ply(path):
     pcd = o3d.io.read_point_cloud(str(path))
     pts = np.asarray(pcd.points)
+
     if len(pts) == 0:
+        print(f"[WARN] Empty → {path.name}")
         return None
+
     return downsample(pts)
 
-# ==============================
-# SCALE NORMALIZATION
-# ==============================
-def normalize_scale(pts):
-    min_pt = pts.min(axis=0)
-    max_pt = pts.max(axis=0)
-    diag = np.linalg.norm(max_pt - min_pt) + EPS
-    return pts / diag
+
+def scene_scale(pts):
+    return np.linalg.norm(pts.max(axis=0) - pts.min(axis=0))
+
 
 # ==============================
-# ALIGNMENT
+# ICP ALIGNMENT
 # ==============================
-def align_icp(src_pts, tgt_pts):
-    src = o3d.geometry.PointCloud()
-    tgt = o3d.geometry.PointCloud()
+def align_icp(src, tgt, threshold):
+    s = o3d.geometry.PointCloud()
+    t = o3d.geometry.PointCloud()
 
-    src.points = o3d.utility.Vector3dVector(src_pts)
-    tgt.points = o3d.utility.Vector3dVector(tgt_pts)
+    s.points = o3d.utility.Vector3dVector(src)
+    t.points = o3d.utility.Vector3dVector(tgt)
 
-    # center
-    src.translate(-src.get_center())
-    tgt.translate(-tgt.get_center())
+    s.translate(-s.get_center())
+    t.translate(-t.get_center())
 
     reg = o3d.pipelines.registration.registration_icp(
-        src, tgt,
-        THRESHOLD,
+        s, t,
+        threshold,
         np.eye(4),
-        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        o3d.pipelines.registration.TransformationEstimationPointToPoint()
     )
 
-    src.transform(reg.transformation)
+    s.transform(reg.transformation)
 
-    return (
-        np.asarray(src.points),
-        float(reg.fitness),
-        float(reg.inlier_rmse)
-    )
+    return np.asarray(s.points), float(reg.fitness), float(reg.inlier_rmse)
+
 
 # ==============================
-# NN DISTANCE
+# DISTANCE CORE
 # ==============================
-def nn_dist(a_pts, b_pts):
+def nn_dist(a, b):
     pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(b_pts)
+    pcd.points = o3d.utility.Vector3dVector(b)
+
     tree = o3d.geometry.KDTreeFlann(pcd)
 
     dists = []
-    for p in a_pts:
+    for p in a:
         _, idx, _ = tree.search_knn_vector_3d(p, 1)
         if idx:
-            nn = b_pts[idx[0]]
-            dists.append(np.linalg.norm(p - nn))
+            dists.append(np.linalg.norm(p - b[idx[0]]))
 
-    if not dists:
-        return np.array([EPS])
+    return np.array(dists) if len(dists) else np.array([EPS])
 
-    return np.array(dists)
 
 # ==============================
-# SYMMETRIC CHAMFER
+# COVERAGE (ROBUST)
 # ==============================
-def chamfer_symmetric(a, b):
-    d1 = nn_dist(a, b)
-    d2 = nn_dist(b, a)
+def coverage_ratio(comp_dist):
+    if len(comp_dist) == 0:
+        return 0.0
+
+    thr = np.percentile(comp_dist, 90)
+    return float(np.mean(comp_dist <= thr))
+
+
+# ==============================
+# DISTRIBUTION
+# ==============================
+def error_distribution(acc, comp):
+    all_err = np.concatenate([acc, comp])
+
     return {
-        "mean": float(np.mean(d1) + np.mean(d2)),
-        "std": float(np.std(d1) + np.std(d2))
+        "acc_std": float(np.std(acc)),
+        "comp_std": float(np.std(comp)),
+        "error_p50": float(np.percentile(all_err, 50)),
+        "error_p90": float(np.percentile(all_err, 90)),
+        "error_p95": float(np.percentile(all_err, 95)),
+        "error_max": float(np.max(all_err))
     }
 
-# ==============================
-# COLMAP READER
-# ==============================
-def read_images_bin(path):
-    cams = []
-    with open(path, "rb") as f:
-        num = struct.unpack("Q", f.read(8))[0]
-        for _ in range(num):
-            f.read(4)
-            qw, qx, qy, qz = struct.unpack("dddd", f.read(32))
-            tx, ty, tz = struct.unpack("ddd", f.read(24))
-            f.read(4)
-
-            while f.read(1) != b"\x00":
-                pass
-
-            n = struct.unpack("Q", f.read(8))[0]
-            f.read(n * 24)
-
-            cams.append((qw, qx, qy, qz, tx, ty, tz))
-
-    return cams
 
 # ==============================
-# PROJECTION DISPERSION (CLEAR NAMING)
+# STABLE F-SCORE
 # ==============================
-def projection_dispersion(points, cams):
-    def project(p, cam):
-        qw, qx, qy, qz, tx, ty, tz = cam
+def stable_fscore(acc, comp, scale):
+    acc_n = acc / (scale + EPS)
+    comp_n = comp / (scale + EPS)
 
-        R = np.array([
-            [1 - 2*qy*qy - 2*qz*qz, 2*qx*qy - 2*qz*qw, 2*qx*qz + 2*qy*qw],
-            [2*qx*qy + 2*qz*qw, 1 - 2*qx*qx - 2*qz*qz, 2*qy*qz - 2*qx*qw],
-            [2*qx*qz - 2*qy*qw, 2*qy*qz + 2*qx*qw, 1 - 2*qx*qx - 2*qy*qy]
-        ])
-        t = np.array([tx, ty, tz])
+    precision = np.mean(1.0 / (1.0 + acc_n))
+    recall = np.mean(1.0 / (1.0 + comp_n))
 
-        pc = (R @ p.T).T + t
-        z = pc[:, 2] + EPS
-        return np.stack([pc[:, 0] / z, pc[:, 1] / z], axis=1)
+    return float(2 * precision * recall / (precision + recall + EPS))
 
-    spreads = []
-    for cam in cams:
-        proj = project(points, cam)
-        center = np.mean(proj, axis=0)
-        spreads.append(np.mean(np.linalg.norm(proj - center, axis=1)))
-
-    return float(np.mean(spreads)) if spreads else float(EPS)
 
 # ==============================
-# RUN VISUALIZATION
+# METRIC CORE
 # ==============================
-def run_visualization(output_json):
-    vis_script = Path(__file__).parent / "vis.py"
+def compute_metrics(pred, ref):
+    acc = nn_dist(pred, ref)
+    comp = nn_dist(ref, pred)
 
-    if not vis_script.exists():
-        print("[WARNING] vis.py not found. Skipping visualization.")
-        return
+    scale = scene_scale(ref)
 
-    print("[INFO] Running visualization...")
+    return {
+        "accuracy_mean": float(np.mean(acc)),
+        "completeness_mean": float(np.mean(comp)),
+        "chamfer_distance": float(np.mean(acc) + np.mean(comp)),
+        "coverage_ratio": coverage_ratio(comp),
+        "fscore": stable_fscore(acc, comp, scale),
+        **error_distribution(acc, comp)
+    }
 
-    try:
-        subprocess.run([
-            sys.executable,
-            str(vis_script),
-            "--input",
-            str(output_json),
-            "--output_dir",
-            str(output_json.parent / "viz_outputs")
-        ], check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Visualization failed: {e}")
+
+# ==============================
+# PSEUDO GT (CONSENSUS)
+# ==============================
+def build_consensus(models):
+    print("[INFO] Building pseudo-GT (consensus)...")
+
+    all_points = np.vstack(list(models.values()))
+
+    # downsample to keep stable
+    return downsample(all_points)
 
 
 # ==============================
 # MAIN
 # ==============================
 def main():
-    ply_folder, sparse_model, output = ask_user()
+    ply_folder, gt_path, output = ask_user()
 
     meshes = {}
+
+    print("\n[INFO] Loading PLY files...")
+
     for f in ply_folder.glob("*.ply"):
+        if gt_path and f.resolve() == gt_path.resolve():
+            print(f"[INFO] Skipping GT → {f.name}")
+            continue
+
         pts = load_ply(f)
         if pts is not None:
-            pts = normalize_scale(pts)
             meshes[f.name] = pts
 
-    if len(meshes) < 2:
-        print("[ERROR] Need >= 2 meshes")
+    if not meshes:
+        print("[ERROR] No models found")
         sys.exit(1)
 
-    cams = read_images_bin(sparse_model / "images.bin")
+    # ==========================
+    # MODE SELECTION
+    # ==========================
+    if gt_path:
+        mode = "GT"
+        ref = load_ply(gt_path)
+    else:
+        mode = "RELATIVE"
+        ref = build_consensus(meshes)
+
+    scale = scene_scale(ref)
+    threshold = 0.02 * scale
 
     results = {
-        "pairwise": {},
-        "per_model": {}
+        "evaluation_protocol": {
+            "mode": mode,
+            "scene_scale": float(scale),
+            "icp_threshold": float(threshold)
+        },
+        "per_model_metrics": {}
     }
 
-    names = list(meshes.keys())
+    print(f"\n[INFO] Mode: {mode}")
+    print("[INFO] Evaluating...")
 
-    # ------------------
-    # Pairwise metrics
-    # ------------------
-    for i in range(len(names)):
-        for j in range(i + 1, len(names)):
-            a, b = names[i], names[j]
-            print(f"Comparing {a} vs {b}")
-
-            aligned_ab, fit_ab, rmse_ab = align_icp(meshes[a], meshes[b])
-            aligned_ba, fit_ba, rmse_ba = align_icp(meshes[b], meshes[a])
-
-            chamfer_ab = chamfer_symmetric(aligned_ab, meshes[b])
-            chamfer_ba = chamfer_symmetric(aligned_ba, meshes[a])
-
-            results["pairwise"][f"{a}__vs__{b}"] = {
-                "chamfer_mean": (chamfer_ab["mean"] + chamfer_ba["mean"]) / 2,
-                "chamfer_std": (chamfer_ab["std"] + chamfer_ba["std"]) / 2,
-                "icp_fitness": (fit_ab + fit_ba) / 2,
-                "icp_rmse": (rmse_ab + rmse_ba) / 2
-            }
-
-    # ------------------
-    # Per-model metrics
-    # ------------------
     for name, pts in meshes.items():
-        print(f"Evaluating {name}")
+        aligned, fit, rmse = align_icp(pts, ref, threshold)
 
-        results["per_model"][name] = {
-            "projection_dispersion": projection_dispersion(pts, cams),
-            "num_points": int(len(pts))
+        m = compute_metrics(aligned, ref)
+
+        results["per_model_metrics"][name] = {
+            **m,
+            "icp_fitness": fit,
+            "icp_rmse": rmse,
+            "num_points": len(pts)
         }
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output, "w") as f:
+    with open(output, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=4)
 
     print(f"\n[INFO] Saved → {output}")
-
-    # Auto visualization
-    run_visualization(output)
 
 
 if __name__ == "__main__":

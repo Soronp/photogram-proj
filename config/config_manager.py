@@ -1,36 +1,28 @@
 from copy import deepcopy
-from pathlib import Path
-
 
 # =====================================================
-# DEFAULT CONFIG (CONSISTENT + SAFE)
+# DEFAULT CONFIG (CLEAN PIPELINE ENGINE)
 # =====================================================
 
 DEFAULT_CONFIG = {
 
     "pipeline": {
         "name": "adaptive_multibackend_sfm",
-        "mode": "mesh",
+        "mode": "full",
 
         "backends": {
-            "sparse": "colmap",
-
-            # 🔥 SAFE DEFAULT (aligned)
-            "dense": "nerfstudio",
-            "mesh": "auto",          # 🔥 auto-resolve
-            "texture": "auto"
+            "sparse": "colmap",     # colmap | openmvg
+            "dense": "colmap",      # colmap | openmvs | nerfstudio
+            "mesh": "colmap",       # colmap | openmvs | poisson
+            "texture": "colmap"     # colmap | openmvs
         },
 
         "camera_model": "auto"
     },
 
-    "paths": {
-        "project_root": None
-    },
+    "paths": {"project_root": None},
 
-    "ingestion": {
-        "copy_mode": "copy"
-    },
+    "ingestion": {"copy_mode": "copy"},
 
     "downsampling": {
         "enabled": True,
@@ -50,25 +42,16 @@ DEFAULT_CONFIG = {
         "use_gpu": True
     },
 
+    # =====================================================
+    # BACKEND SPECIFICATIONS
+    # =====================================================
+
     "sparse": {
-        "fallback_to_colmap": True,
-
-        "colmap": {
-            "init_min_inliers": 40,
-            "abs_min_inliers": 30,
-            "min_model_size": 15,
-            "ba_global_iter": 50,
-            "ba_local_iter": 25,
-            "use_gpu": True
-        },
-
+        "colmap": {},
         "openmvg": {
             "feature_type": "SIFT",
             "matching_strategy": "ANNL2",
             "camera_model": "PINHOLE",
-            "num_threads": -1,
-            "sensor_database": None,
-            "geometric_model": "e",
             "guided_matching": True
         }
     },
@@ -78,15 +61,11 @@ DEFAULT_CONFIG = {
         "openmvs": {},
         "nerfstudio": {
             "method": "nerfacto",
-            "fallback_order": ["nerfacto", "instant-ngp"],
-            "allow_cuda_extensions": False,
-
             "iterations": 30000,
             "device": "cuda",
             "precision": "fp32",
-
             "export": {
-                "type": "pointcloud",   # 🔥 explicit
+                "type": "pointcloud",
                 "format": "ply"
             }
         }
@@ -99,17 +78,13 @@ DEFAULT_CONFIG = {
     },
 
     "texture": {
+        "colmap": {},
         "openmvs": {}
     },
 
     "analysis": {
         "enabled": True,
         "save_metrics": True
-    },
-
-    "_meta": {
-        "retry_count": 0,
-        "last_params": None
     }
 }
 
@@ -124,12 +99,60 @@ def load_config(user_config=None):
     if user_config:
         _deep_update(config, user_config)
 
-    _resolve_camera_model(config)
+    _resolve_pipeline_rules(config)
     _validate_backends(config)
-    _resolve_backend_compatibility(config)
-    _validate_nerfstudio(config)
+    _resolve_camera_model(config)
 
     return config
+
+
+# =====================================================
+# PIPELINE RULE ENGINE (CORE FIX)
+# =====================================================
+
+def _resolve_pipeline_rules(config):
+    """
+    This is the ONLY place pipeline behavior is defined.
+    No None hacks. No ambiguous optional logic.
+    """
+
+    backends = config["pipeline"]["backends"]
+    sparse = backends["sparse"]
+
+    # -------------------------------------------------
+    # PIPELINE D = OpenMVG + OpenMVS FULL STACK
+    # -------------------------------------------------
+    if sparse == "openmvg":
+        backends["dense"] = "openmvs"
+        backends["mesh"] = "openmvs"
+        backends["texture"] = "openmvs"
+        return
+
+    # -------------------------------------------------
+    # COLMAP FULL PIPELINE
+    # -------------------------------------------------
+    if sparse == "colmap":
+        backends["dense"] = "colmap"
+        backends["mesh"] = "colmap"
+        backends["texture"] = "colmap"
+
+
+# =====================================================
+# VALIDATION (STRICT BUT CONSISTENT)
+# =====================================================
+
+def _validate_backends(config):
+    valid = {
+        "sparse": ["colmap", "openmvg"],
+        "dense": ["colmap", "openmvs", "nerfstudio"],
+        "mesh": ["colmap", "openmvs", "poisson"],
+        "texture": ["colmap", "openmvs"]
+    }
+
+    for k, allowed in valid.items():
+        v = config["pipeline"]["backends"][k]
+        if v not in allowed:
+            raise ValueError(f"[CONFIG] Invalid {k}: {v}")
 
 
 # =====================================================
@@ -137,93 +160,11 @@ def load_config(user_config=None):
 # =====================================================
 
 def _resolve_camera_model(config):
-    backend = config["pipeline"]["backends"]["sparse"]
+    sparse = config["pipeline"]["backends"]["sparse"]
 
-    model = "PINHOLE" if backend == "openmvg" else "SIMPLE_RADIAL"
-
-    override = config["pipeline"].get("camera_model")
-
-    if override == "pinhole":
-        model = "PINHOLE"
-    elif override == "opencv":
-        model = "OPENCV"
-
-    config["pipeline"]["camera_model"] = model
-
-
-# =====================================================
-# BACKEND VALIDATION
-# =====================================================
-
-def _validate_backends(config):
-    valid = {
-        "sparse": ["colmap", "openmvg"],
-        "dense": ["colmap", "openmvs", "nerfstudio"],
-        "mesh": ["colmap", "openmvs", "poisson", "auto"],
-    }
-
-    for k, allowed in valid.items():
-        v = config["pipeline"]["backends"].get(k)
-        if v not in allowed:
-            raise ValueError(f"[CONFIG] Invalid {k}: {v}")
-
-
-# =====================================================
-# 🔥 BACKEND COMPATIBILITY RESOLUTION (CRITICAL FIX)
-# =====================================================
-
-def _resolve_backend_compatibility(config):
-    dense = config["pipeline"]["backends"]["dense"]
-    mesh = config["pipeline"]["backends"]["mesh"]
-
-    # AUTO RESOLVE
-    if mesh == "auto":
-
-        if dense == "colmap":
-            config["pipeline"]["backends"]["mesh"] = "colmap"
-
-        elif dense == "openmvs":
-            config["pipeline"]["backends"]["mesh"] = "openmvs"
-
-        elif dense == "nerfstudio":
-            # depends on export type
-            export_type = config["dense"]["nerfstudio"]["export"]["type"]
-
-            if export_type == "mesh":
-                config["pipeline"]["backends"]["mesh"] = "none"
-            else:
-                config["pipeline"]["backends"]["mesh"] = "colmap"
-
-    # HARD VALIDATION
-    dense = config["pipeline"]["backends"]["dense"]
-    mesh = config["pipeline"]["backends"]["mesh"]
-
-    if dense == "openmvs" and mesh == "colmap":
-        raise RuntimeError(
-            "[CONFIG ERROR] openmvs dense cannot be used with colmap mesh"
-        )
-
-    if dense == "colmap" and mesh == "openmvs":
-        raise RuntimeError(
-            "[CONFIG ERROR] colmap dense cannot be used with openmvs mesh"
-        )
-
-
-# =====================================================
-# 🔥 NERF VALIDATION
-# =====================================================
-
-def _validate_nerfstudio(config):
-    if config["pipeline"]["backends"]["dense"] != "nerfstudio":
-        return
-
-    ns = config["dense"]["nerfstudio"]
-
-    if ns["device"] not in ["cuda", "cpu"]:
-        raise ValueError("Invalid Nerfstudio device")
-
-    if ns["precision"] not in ["fp32", "fp16"]:
-        raise ValueError("Invalid precision")
+    config["pipeline"]["camera_model"] = (
+        "PINHOLE" if sparse == "openmvg" else "SIMPLE_RADIAL"
+    )
 
 
 # =====================================================

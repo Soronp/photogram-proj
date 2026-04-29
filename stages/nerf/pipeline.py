@@ -6,7 +6,7 @@ import sys
 
 
 # =====================================================
-# ENV
+# ENVIRONMENT
 # =====================================================
 
 def _safe_env():
@@ -17,7 +17,7 @@ def _safe_env():
 
 
 # =====================================================
-# EXECUTABLES
+# EXECUTABLE RESOLUTION
 # =====================================================
 
 def _resolve_ns():
@@ -42,7 +42,7 @@ def _latest_config(run_root: Path):
     cfgs = list(run_root.rglob("config.yml"))
 
     if not cfgs:
-        raise RuntimeError("No config.yml found")
+        raise RuntimeError("No config.yml found in nerf runs")
 
     return max(cfgs, key=lambda p: p.stat().st_mtime)
 
@@ -61,16 +61,16 @@ def _validate_dataset(dataset_dir: Path):
     frames = data.get("frames", [])
 
     if len(frames) < 10:
-        raise RuntimeError(f"Too few frames: {len(frames)}")
+        raise RuntimeError(f"[NERF] Too few frames: {len(frames)}")
 
     return len(frames)
 
 
 # =====================================================
-# TRAIN (FAST MODE)
+# TRAIN COMMAND (FAST VALIDATION MODE)
 # =====================================================
 
-def _build_cmd(ns_train, dataset_dir, run_root, device):
+def _build_train_cmd(ns_train, dataset_dir, run_root, device):
 
     return [
         ns_train,
@@ -79,8 +79,8 @@ def _build_cmd(ns_train, dataset_dir, run_root, device):
         "--output-dir", str(run_root),
         "--machine.device-type", device,
 
-        # 🔥 FAST TEST MODE
-        "--max-num-iterations", "3000",
+        # FAST MODE (validation only)
+        "--max-num-iterations", "2500",
 
         "--pipeline.model.predict-normals", "False",
         "--pipeline.model.num-nerf-samples-per-ray", "64",
@@ -96,9 +96,9 @@ def _build_cmd(ns_train, dataset_dir, run_root, device):
 
 def _run_training(ns_train, dataset_dir, run_root, env, tool_runner, logger):
 
-    logger.info("[NERF] FAST training (GPU)")
+    logger.info("[NERF] Training (FAST, GPU preferred)")
 
-    cmd = _build_cmd(ns_train, dataset_dir, run_root, "cuda")
+    cmd = _build_train_cmd(ns_train, dataset_dir, run_root, "cuda")
 
     result = tool_runner.run(
         cmd,
@@ -112,7 +112,7 @@ def _run_training(ns_train, dataset_dir, run_root, env, tool_runner, logger):
 
     logger.warning("[NERF] GPU failed → CPU fallback")
 
-    cmd = _build_cmd(ns_train, dataset_dir, run_root, "cpu")
+    cmd = _build_train_cmd(ns_train, dataset_dir, run_root, "cpu")
 
     tool_runner.run(
         cmd,
@@ -123,12 +123,12 @@ def _run_training(ns_train, dataset_dir, run_root, env, tool_runner, logger):
 
 
 # =====================================================
-# EXPORT (STABLE)
+# EXPORT POINT CLOUD (AUXILIARY ONLY)
 # =====================================================
 
-def _export(ns_export, config, export_dir, env, tool_runner, logger):
+def _export_pointcloud(ns_export, config, export_dir, env, tool_runner, logger):
 
-    logger.info("[NERF] Exporting point cloud (stable mode)")
+    logger.info("[NERF] Exporting auxiliary point cloud")
 
     cmd = [
         ns_export,
@@ -137,9 +137,9 @@ def _export(ns_export, config, export_dir, env, tool_runner, logger):
         "--load-config", str(config),
         "--output-dir", str(export_dir),
 
-        "--num-points", "1000000",   # 🔥 lower for speed
+        "--num-points", "800000",
         "--remove-outliers", "True",
-        "--normal-method", "open3d",  # 🔥 stable (NOT model_output)
+        "--normal-method", "open3d",
     ]
 
     result = tool_runner.run(
@@ -152,8 +152,7 @@ def _export(ns_export, config, export_dir, env, tool_runner, logger):
     if result["success"]:
         return
 
-    # fallback (even simpler)
-    logger.warning("[NERF] Export failed → retry minimal")
+    logger.warning("[NERF] Export failed → fallback minimal")
 
     fallback = [
         ns_export,
@@ -171,97 +170,111 @@ def _export(ns_export, config, export_dir, env, tool_runner, logger):
 
 
 # =====================================================
-# FIND PLY
+# FIND BEST OUTPUT
 # =====================================================
 
-def _find_ply(export_dir: Path):
+def _find_largest_ply(export_dir: Path):
     plys = list(export_dir.rglob("*.ply"))
 
     if not plys:
-        raise RuntimeError("No PLY exported")
+        raise RuntimeError("[NERF] No PLY exported")
 
     return max(plys, key=lambda p: p.stat().st_size)
 
 
 # =====================================================
-# MESH (FAST POISSON)
+# OPTIONAL DEBUG MESH (EXPLICITLY NON-GEOMETRIC)
 # =====================================================
 
-def _mesh(paths, tool_runner, logger):
+def _maybe_debug_mesh(paths, nerf_ply, tool_runner, logger, config):
 
-    logger.info("[NERF] Poisson meshing (fast mode)")
+    if not config.get("nerf", {}).get("debug_mesh", False):
+        return None
 
-    input_ply = paths.dense / "fused.ply"
-    output_mesh = paths.dense / "final_mesh.ply"
+    debug_mesh = paths.dense / "nerf_debug_mesh.ply"
+
+    logger.info("[NERF] Generating debug mesh (visualization only)")
 
     cmd = [
         "colmap",
         "poisson_mesher",
-        "--input_path", str(input_ply),
-        "--output_path", str(output_mesh),
-
-        # 🔥 FAST SETTINGS
-        "--PoissonMeshing.depth", "8",
-        "--PoissonMeshing.trim", "6"
+        "--input_path", str(nerf_ply),
+        "--output_path", str(debug_mesh),
+        "--PoissonMeshing.depth", "7",
+        "--PoissonMeshing.trim", "7"
     ]
 
     tool_runner.run(
         cmd,
-        stage="POISSON MESH",
-        allow_failure=False
+        stage="NERF DEBUG MESH",
+        allow_failure=True
     )
 
-    return output_mesh
+    return debug_mesh
 
 
 # =====================================================
-# MAIN
+# MAIN ENTRY
 # =====================================================
 
 def run_nerfstudio_dense(paths, config, logger, tool_runner):
+    """
+    Nerfstudio auxiliary stage.
 
-    logger.info("==== FAST NERF → MESH PIPELINE ====")
+    Responsibilities:
+    - Train NeRF (fast validation mode)
+    - Export point cloud (diagnostic / auxiliary)
+    - NEVER modify primary geometry outputs
+    - NEVER act as mesh authority
+    """
+
+    logger.info("==== NERF (AUXILIARY STAGE) ====")
 
     ns_train, ns_export = _resolve_ns()
 
-    work = paths.dense / "nerf"
-    runs = work / "runs"
-    export_dir = work / "export"
+    work_dir = paths.dense / "nerf"
+    runs_dir = work_dir / "runs"
+    export_dir = work_dir / "export"
 
-    runs.mkdir(parents=True, exist_ok=True)
+    runs_dir.mkdir(parents=True, exist_ok=True)
     export_dir.mkdir(parents=True, exist_ok=True)
 
+    # -----------------------
+    # DATASET PREP
+    # -----------------------
     from stages.nerf.colmap_to_nerf import run_colmap_to_nerfstudio
 
-    dataset = run_colmap_to_nerfstudio(paths, config, logger)
-    _validate_dataset(dataset)
+    dataset_dir = run_colmap_to_nerfstudio(paths, config, logger)
+    _validate_dataset(dataset_dir)
 
     env = _safe_env()
 
     # -----------------------
     # TRAIN
     # -----------------------
-    _run_training(ns_train, dataset, runs, env, tool_runner, logger)
+    _run_training(ns_train, dataset_dir, runs_dir, env, tool_runner, logger)
 
     # -----------------------
     # EXPORT
     # -----------------------
-    cfg = _latest_config(runs)
-    _export(ns_export, cfg, export_dir, env, tool_runner, logger)
+    cfg = _latest_config(runs_dir)
+    _export_pointcloud(ns_export, cfg, export_dir, env, tool_runner, logger)
+
+    nerf_ply_src = _find_largest_ply(export_dir)
+
+    # 🔥 STRICT OUTPUT ISOLATION
+    nerf_output = paths.dense / "nerf_pointcloud.ply"
+    shutil.copy(nerf_ply_src, nerf_output)
+
+    logger.info(f"[NERF] Auxiliary cloud saved → {nerf_output}")
 
     # -----------------------
-    # FINALIZE
+    # OPTIONAL DEBUG
     # -----------------------
-    ply = _find_ply(export_dir)
+    debug_mesh = _maybe_debug_mesh(paths, nerf_output, tool_runner, logger, config)
 
-    fused = paths.dense / "fused.ply"
-    shutil.copy(ply, fused)
+    if debug_mesh:
+        logger.info(f"[NERF] Debug mesh → {debug_mesh}")
 
-    # -----------------------
-    # MESH
-    # -----------------------
-    final_mesh = _mesh(paths, tool_runner, logger)
-
-    logger.info(f"[NERF] FINAL MESH → {final_mesh}")
-
-    return final_mesh
+    # 🚨 CRITICAL: DO NOT RETURN MESH
+    return nerf_output

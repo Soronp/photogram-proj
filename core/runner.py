@@ -1,6 +1,8 @@
 from copy import deepcopy
-import json
 import traceback
+import json
+import shutil
+from pathlib import Path
 
 from utils.paths import ProjectPaths
 from utils.logger import setup_logger
@@ -15,181 +17,145 @@ from stages.ingestion.downsample import run as downsample_images
 from stages.sparse.feature_extraction import run as feature_extraction
 from stages.sparse.feature_matching import run as matching
 from stages.sparse.mapper import run as mapper
-
-# OPENMVG
 from stages.sparse.openmvg_reconstruction import run as openmvg_reconstruction
 
-# DENSE (COLMAP)
+# COLMAP DENSE
 from stages.dense.colmap.image_undistorter import run as undistort
 from stages.dense.colmap.patch_match_stereo import run as patch_match
 from stages.dense.colmap.stereo_fusion import run as stereo_fusion
 
 # OPENMVS
-from stages.openmvs.export_openmvs import run as openmvs_export
 from stages.openmvs.densify import run as openmvs_densify
 from stages.openmvs.mesh import run as openmvs_mesh
 from stages.openmvs.texture import run as openmvs_texture
 
-# GENERIC MESH
+# GENERIC
 from stages.mesh.mesh_reconstruction import run as mesh_reconstruction
-
-# NERF
-from stages.nerf.pipeline import run_nerfstudio_dense
 
 
 class PipelineRunner:
 
-    def __init__(self, config, pipeline_type="A"):
-        self.pipeline_type = pipeline_type
+    def __init__(self, config, run_root: Path, pipeline_type="A"):
 
-        self.paths = ProjectPaths(config["paths"]["project_root"])
+        self.pipeline_type = pipeline_type.upper()
+        self.run_root = Path(run_root).resolve()
+
+        if not self.run_root.exists():
+            raise RuntimeError(f"Run root does not exist: {self.run_root}")
+
+        self.paths = ProjectPaths(self.run_root)
         self.logger = setup_logger(self.paths.log_file)
         self.tool_runner = ToolRunner(self.logger)
 
-        self.base_config = deepcopy(config)
         self.config = deepcopy(config)
+
+        self.state_path = self.run_root / "pipeline_state.json"
+
+        self.state = self._load_state()
+        self._handle_resume_choice()
 
         self._configure_pipeline()
         self._configure_camera_policy()
 
     # =====================================================
-    # EXECUTION WRAPPER
+    # STATE
+    # =====================================================
+    def _load_state(self):
+        if self.state_path.exists():
+            try:
+                return json.loads(self.state_path.read_text())
+            except:
+                return {}
+        return {}
+
+    def _save_state(self):
+        self.state_path.write_text(json.dumps(self.state, indent=2))
+
+    def _handle_resume_choice(self):
+        if not self.state:
+            return
+
+        print("\n⚠️ Previous state detected:")
+        print(json.dumps(self.state, indent=2))
+
+        choice = input("\nResume? (y/n) [y]: ").strip().lower()
+
+        if choice == "n":
+            self.state = {}
+            self._save_state()
+
+    # =====================================================
+    # EXECUTION
     # =====================================================
     def _execute_stage(self, name, fn, *args):
+
+        if self.state.get(name) == "complete":
+            self.logger.info(f"[SKIP] {name}")
+            return
+
         self.logger.info(f"===== START: {name} =====")
+
         try:
             result = fn(*args)
+
+            self.state[name] = "complete"
+            self._save_state()
+
             self.logger.info(f"===== END: {name} =====")
             return result
+
         except Exception as e:
-            self.logger.error(f"❌ FAILED: {name} → {e}")
+            self.state[name] = "failed"
+            self._save_state()
+
+            self.logger.error(f"FAILED {name}: {e}")
             self.logger.error(traceback.format_exc())
             raise
-
-    # =====================================================
-    # FILE CHECK
-    # =====================================================
-    def _check_file(self, path, desc):
-        if not path.exists():
-            raise RuntimeError(f"{desc} missing: {path}")
-        if path.is_file() and path.stat().st_size == 0:
-            raise RuntimeError(f"{desc} is empty: {path}")
-
-    # =====================================================
-    # BACKEND-AWARE DENSE VALIDATION (🔥 FIX)
-    # =====================================================
-    def _validate_dense_output(self):
-        backend = self.config["pipeline"]["backends"]["dense"]
-
-        if backend == "colmap":
-            fused = self.paths.dense / "fused.ply"
-            self._check_file(fused, "COLMAP fused point cloud")
-
-        elif backend == "openmvs":
-            mvs = self.paths.run_root / "openmvs" / "scene_dense.mvs"
-            self._check_file(mvs, "OpenMVS dense scene")
-
-        elif backend == "nerfstudio":
-            fused = self.paths.dense / "fused.ply"
-
-            if fused.exists():
-                self._check_file(fused, "Nerfstudio point cloud")
-            else:
-                self.logger.warning(
-                    "[DENSE] Nerfstudio output not standardized (no fused.ply found)"
-                )
-
-        else:
-            raise RuntimeError(f"Unknown dense backend: {backend}")
 
     # =====================================================
     # PIPELINE CONFIG
     # =====================================================
     def _configure_pipeline(self):
-        backends = self.config["pipeline"]["backends"]
 
-        if self.pipeline_type == "A":
-            self.logger.info("Pipeline A: COLMAP full")
-            backends.update({
-                "sparse": "colmap",
-                "dense": "colmap",
-                "mesh": "colmap",
-                "texture": "colmap"
-            })
+        mapping = {
+            "A": ("colmap", "colmap", "colmap", "colmap"),
+            "B": ("glomap", "colmap", "colmap", "colmap"),
+            "C": ("colmap", "openmvs", "openmvs", "openmvs"),
+            "D": ("openmvg", "openmvs", "openmvs", "openmvs"),  # ✅ FULL PIPELINE
+        }
 
-        elif self.pipeline_type == "C":
-            self.logger.info("Pipeline C: COLMAP → OpenMVS")
-            backends.update({
-                "sparse": "colmap",
-                "dense": "openmvs",
-                "mesh": "openmvs",
-                "texture": "openmvs"
-            })
+        s, d, m, t = mapping[self.pipeline_type]
 
-        elif self.pipeline_type == "D":
-            self.logger.info("Pipeline D: OpenMVG → OpenMVS")
-            backends.update({
-                "sparse": "openmvg",
-                "dense": "openmvs",
-                "mesh": "openmvs",
-                "texture": "openmvs"
-            })
+        self.config["pipeline"]["backends"].update({
+            "sparse": s,
+            "dense": d,
+            "mesh": m,
+            "texture": t
+        })
 
-        elif self.pipeline_type == "E":
-            self.logger.info("Pipeline E: COLMAP → Nerfstudio")
-            backends.update({
-                "sparse": "colmap",
-                "dense": "nerfstudio",
-                "mesh": "colmap"
-            })
-
-        else:
-            raise ValueError(f"Invalid pipeline type: {self.pipeline_type}")
-
-    # =====================================================
-    # CAMERA POLICY
-    # =====================================================
     def _configure_camera_policy(self):
-        backends = self.config["pipeline"]["backends"]
-
-        if backends["dense"] == "openmvs":
-            camera_model = "PINHOLE"
-        elif backends["sparse"] == "openmvg":
-            camera_model = "PINHOLE"
+        if self.config["pipeline"]["backends"]["sparse"] == "openmvg":
+            self.config["pipeline"]["camera_model"] = "PINHOLE"
         else:
-            camera_model = "OPENCV"
-
-        self.config["pipeline"]["camera_model"] = camera_model
-        self.logger.info(f"Camera model set to: {camera_model}")
+            self.config["pipeline"]["camera_model"] = "OPENCV"
 
     # =====================================================
     # MAIN RUN
     # =====================================================
     def run(self):
+
         self.logger.info("========== PIPELINE START ==========")
 
         try:
             self._run_ingestion()
             self._run_sparse()
-
-            # -----------------------
-            # DENSE
-            # -----------------------
-            self._execute_stage("DENSE", self._run_dense)
-            self._validate_dense_output()   # 🔥 FIXED
-
-            # -----------------------
-            # MESH
-            # -----------------------
-            self._execute_stage("MESH", self._run_mesh)
-
-            # -----------------------
-            # TEXTURE
-            # -----------------------
-            self._execute_stage("TEXTURE", self._run_texture)
+            self._prepare_openmvs_input()   # 🔥 CRITICAL FIX
+            self._run_dense()
+            self._run_mesh()
+            self._run_texture()
 
         except Exception as e:
-            self.logger.error(f"❌ PIPELINE FAILED: {e}")
+            self.logger.error(f"PIPELINE FAILED: {e}")
             raise
 
         self.logger.info("========== PIPELINE END ==========")
@@ -202,64 +168,102 @@ class PipelineRunner:
         self._execute_stage("VALIDATE", validate_images, self.paths, self.config, self.logger)
 
         if self.config["downsampling"]["enabled"]:
-            self._execute_stage("DOWNSAMPLE", downsample_images, self.paths, self.config, self.logger)
+            self._execute_stage("DOWNSAMPLE", downsample_images,
+                                self.paths, self.config, self.logger)
 
     # =====================================================
     # SPARSE
     # =====================================================
     def _run_sparse(self):
+
         backend = self.config["pipeline"]["backends"]["sparse"]
 
         if backend == "openmvg":
-            self._execute_stage("OPENMVG", openmvg_reconstruction,
-                                self.paths.run_root, self.paths.project_root, False, self.logger)
+            self._execute_stage(
+                "OPENMVG",
+                openmvg_reconstruction,
+                self.paths.run_root,
+                self.paths.run_root,
+                False,
+                self.logger
+            )
         else:
-            self._execute_stage("FEATURE EXTRACTION", feature_extraction,
+            self._execute_stage("FEATURE", feature_extraction,
                                 self.paths, self.config, self.logger, self.tool_runner)
+
             self._execute_stage("MATCHING", matching,
                                 self.paths, self.config, self.logger, self.tool_runner)
+
             self._execute_stage("MAPPER", mapper,
                                 self.paths, self.config, self.logger, self.tool_runner)
+
+    # =====================================================
+    # 🔥 CRITICAL FIX: MOVE scene.mvs
+    # =====================================================
+    def _prepare_openmvs_input(self):
+
+        if self.config["pipeline"]["backends"]["sparse"] != "openmvg":
+            return
+
+        src = self.paths.sparse / "openmvg_reconstruction" / "openmvs" / "scene.mvs"
+        dst_dir = self.paths.openmvs
+        dst = dst_dir / "scene.mvs"
+
+        if not src.exists():
+            raise RuntimeError("Missing scene.mvs from OpenMVG")
+
+        dst_dir.mkdir(parents=True, exist_ok=True)
+
+        self.logger.info("Moving OpenMVG scene → OpenMVS workspace")
+
+        shutil.copy2(src, dst)
 
     # =====================================================
     # DENSE
     # =====================================================
     def _run_dense(self):
+
         backend = self.config["pipeline"]["backends"]["dense"]
 
-        if backend == "colmap":
-            self._execute_stage("UNDISTORT", undistort, self.paths, self.config, self.logger, self.tool_runner)
-            self._execute_stage("PATCH MATCH", patch_match, self.paths, self.config, self.logger, self.tool_runner)
-            self._execute_stage("STEREO FUSION", stereo_fusion, self.paths, self.config, self.logger, self.tool_runner)
+        if backend == "openmvs":
+            self._execute_stage("OPENMVS DENSIFY",
+                                openmvs_densify,
+                                self.paths, self.config, self.logger, self.tool_runner)
 
-        elif backend == "openmvs":
-            self._execute_stage("UNDISTORT", undistort, self.paths, self.config, self.logger, self.tool_runner)
-            self._execute_stage("OPENMVS EXPORT", openmvs_export, self.paths, self.config, self.logger, self.tool_runner)
-            self._execute_stage("OPENMVS DENSIFY", openmvs_densify, self.paths, self.config, self.logger, self.tool_runner)
+        elif backend == "colmap":
+            self._execute_stage("UNDISTORT", undistort,
+                                self.paths, self.config, self.logger, self.tool_runner)
 
-        elif backend == "nerfstudio":
-            self._execute_stage("NERFSTUDIO", run_nerfstudio_dense,
+            self._execute_stage("PATCH MATCH", patch_match,
+                                self.paths, self.config, self.logger, self.tool_runner)
+
+            self._execute_stage("STEREO FUSION", stereo_fusion,
                                 self.paths, self.config, self.logger, self.tool_runner)
 
     # =====================================================
     # MESH
     # =====================================================
     def _run_mesh(self):
+
         backend = self.config["pipeline"]["backends"]["mesh"]
 
         if backend == "openmvs":
-            self._execute_stage("OPENMVS MESH", openmvs_mesh,
+            self._execute_stage("OPENMVS MESH",
+                                openmvs_mesh,
                                 self.paths, self.config, self.logger, self.tool_runner)
         else:
-            self._execute_stage("MESH", mesh_reconstruction,
+            self._execute_stage("MESH",
+                                mesh_reconstruction,
                                 self.paths, self.config, self.logger, self.tool_runner)
 
     # =====================================================
     # TEXTURE
     # =====================================================
     def _run_texture(self):
-        backend = self.config["pipeline"]["backends"].get("texture")
+
+        backend = self.config["pipeline"]["backends"]["texture"]
 
         if backend == "openmvs":
-            self._execute_stage("OPENMVS TEXTURE", openmvs_texture,
+            self._execute_stage("OPENMVS TEXTURE",
+                                openmvs_texture,
                                 self.paths, self.config, self.logger, self.tool_runner)
