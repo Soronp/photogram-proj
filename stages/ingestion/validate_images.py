@@ -17,7 +17,6 @@ def resize_image(in_path, out_path, max_dim):
             new_size = (int(w * scale), int(h * scale))
             img = img.resize(new_size, Image.LANCZOS)
 
-        # 🔥 KEEP original format if possible
         img.save(out_path, quality=95)
 
 

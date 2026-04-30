@@ -320,7 +320,7 @@ def run(path):
 # ENTRY
 # =====================================================
 if __name__ == "__main__":
-    print("\n=== MARK-2 Visualization v27 (Adjusted Legend) ===")
+    print("\n=== MARK-2 Visualization ===")
     p = input("Enter results.json path: ").strip()
 
     if not Path(p).exists():

@@ -50,11 +50,11 @@ class ToolRunner:
         if env:
             run_env.update(env)
 
-        # 🔥 Force UTF-8 everywhere
+        # Force UTF-8 everywhere
         run_env["PYTHONIOENCODING"] = "utf-8"
         run_env["PYTHONUTF8"] = "1"
 
-        # 🔥 Prevent rich / ANSI Unicode crashes on Windows
+        #Prevent rich / ANSI Unicode crashes on Windows
         run_env["TERM"] = "dumb"
 
         start_time = time.time()
@@ -63,14 +63,13 @@ class ToolRunner:
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # merge streams (no deadlock)
+                stderr=subprocess.STDOUT,
                 cwd=str(cwd) if cwd else None,
                 env=run_env,
 
-                # 🔥 CRITICAL FIXES
                 text=True,
                 encoding="utf-8",
-                errors="replace",   # NEVER crash on decode
+                errors="replace",
 
                 bufsize=1,
             )
@@ -110,7 +109,6 @@ class ToolRunner:
                 }
 
         except Exception as e:
-            # 🔥 Catch unexpected failures (important for pipeline stability)
             msg = f"[{stage}] CRASHED: {str(e)}"
             self.logger.error(msg)
 

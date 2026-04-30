@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-"""
-MARK-2 Evaluator (v12 - Dual Mode: GT + GT-Free)
-------------------------------------------------
-✔ GT-based evaluation (true geometry)
-✔ GT-free relative evaluation (consensus-based)
-✔ Identical metric schema across modes
-✔ Stable F-score (scale-aware)
-✔ Robust coverage (distribution-based)
-✔ Paper-aligned outputs
-"""
 
 import open3d as o3d
 import numpy as np
@@ -25,7 +15,7 @@ np.random.seed(42)
 # INPUT
 # ==============================
 def ask_user():
-    print("\n=== MARK-2 Evaluator (v12 Dual Mode) ===")
+    print("\n=== MARK-2 Evaluator ===")
 
     ply_folder = Path(input("PLY folder: ").strip())
     gt_input = input("Ground truth PLY (leave empty for GT-free): ").strip()

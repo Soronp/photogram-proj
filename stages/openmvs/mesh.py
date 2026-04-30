@@ -6,7 +6,7 @@ def run(paths, config, logger, tool_runner):
     logger.info(f"---- {stage.upper()} ----")
 
     # =====================================================
-    # 📁 WORKSPACE
+    # WORKSPACE
     # =====================================================
     mvs_dir = (paths.run_root / "openmvs").resolve()
 
@@ -16,7 +16,7 @@ def run(paths, config, logger, tool_runner):
         raise RuntimeError(f"{stage}: missing scene_dense.mvs → run densify first")
 
     # =====================================================
-    # 🎯 OUTPUTS
+    # OUTPUTS
     # =====================================================
     paths.mesh.mkdir(parents=True, exist_ok=True)
 
@@ -24,7 +24,7 @@ def run(paths, config, logger, tool_runner):
     mesh_obj = paths.mesh / "mesh.obj"
 
     # =====================================================
-    # ⚙️ CONFIG
+    # CONFIG
     # =====================================================
     cfg = config.get("mesh", {})
 
@@ -34,7 +34,7 @@ def run(paths, config, logger, tool_runner):
     close_holes = cfg.get("close_holes", 30)
 
     # =====================================================
-    # 🚀 COMMAND (FIXED PARITY WITH CLI)
+    # COMMAND (FIXED PARITY WITH CLI)
     # =====================================================
     cmd = [
         "ReconstructMesh",
@@ -61,12 +61,12 @@ def run(paths, config, logger, tool_runner):
     logger.info(" ".join(cmd))
 
     # =====================================================
-    # ▶️ EXECUTION
+    # EXECUTION
     # =====================================================
     result = tool_runner.run(cmd, stage=stage)
 
     # =====================================================
-    # 🔍 REAL FAILURE DETECTION
+    # REAL FAILURE DETECTION
     # =====================================================
     if not mesh_ply.exists() and not mesh_obj.exists():
         raise RuntimeError(
@@ -74,7 +74,7 @@ def run(paths, config, logger, tool_runner):
         )
 
     # =====================================================
-    # 🎯 OUTPUT RESOLUTION
+    # OUTPUT RESOLUTION
     # =====================================================
     final_mesh = mesh_ply if mesh_ply.exists() else mesh_obj
 

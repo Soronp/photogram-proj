@@ -45,7 +45,7 @@ def run(paths, config, logger, tool_runner):
         raise RuntimeError(f"{stage}: database missing")
 
     # =====================================================
-    # 🔥 FORCE CLEAN MATCH STATE
+    # FORCE CLEAN MATCH STATE
     # =====================================================
     logger.info(f"{stage}: clearing previous matches")
 
@@ -57,7 +57,7 @@ def run(paths, config, logger, tool_runner):
     conn.close()
 
     # =====================================================
-    # 🔥 ANALYSIS INPUT
+    # ANALYSIS INPUT
     # =====================================================
     analysis = config.get("analysis_results", {})
     dataset = analysis.get("dataset", {})
@@ -68,14 +68,14 @@ def run(paths, config, logger, tool_runner):
     logger.info(f"{stage}: images={num_images}, retry={retry}")
 
     # =====================================================
-    # 🔥 MATCHING STRATEGY
+    # MATCHING STRATEGY
     # =====================================================
     # Always exhaustive for object reconstruction
     matcher = "exhaustive"
     logger.info(f"{stage}: matcher=exhaustive (forced)")
 
     # =====================================================
-    # 🔥 BASELINE (GEOMETRY-FIRST)
+    # BASELINE (GEOMETRY-FIRST)
     # =====================================================
     max_ratio = 0.75
     max_distance = 0.7
@@ -83,7 +83,7 @@ def run(paths, config, logger, tool_runner):
     guided_matching = 1
 
     # =====================================================
-    # 🔥 RETRY ADAPTATION (CONTROLLED)
+    # RETRY ADAPTATION (CONTROLLED)
     # =====================================================
     if retry > 0:
         logger.info(f"{stage}: retry level {retry} → relaxing constraints")
@@ -96,7 +96,7 @@ def run(paths, config, logger, tool_runner):
             cross_check = 0
 
     # =====================================================
-    # 🔥 SMALL DATASET BOOST (IMPORTANT FOR YOUR CASE)
+    # SMALL DATASET BOOST (IMPORTANT FOR YOUR CASE)
     # =====================================================
     if num_images <= 50:
         logger.info(f"{stage}: small dataset → boosting recall slightly")
@@ -109,30 +109,23 @@ def run(paths, config, logger, tool_runner):
     )
 
     # =====================================================
-    # 🔥 COMMAND BUILDER
+    # COMMAND BUILDER
     # =====================================================
     def _cmd(use_gpu=True):
         return [
             "colmap", "exhaustive_matcher",
             "--database_path", str(db),
-
             "--SiftMatching.use_gpu", str(int(use_gpu)),
             "--SiftMatching.num_threads", "-1",
-
-            # 🔥 CORE MATCH FILTERING
             "--SiftMatching.max_ratio", str(max_ratio),
             "--SiftMatching.max_distance", str(max_distance),
             "--SiftMatching.cross_check", str(cross_check),
-
-            # 🔥 GEOMETRIC CONSISTENCY
             "--SiftMatching.guided_matching", str(guided_matching),
-
-            # 🔥 STABILITY (IMPORTANT)
             "--ExhaustiveMatching.block_size", "50",
         ]
 
     # =====================================================
-    # 🔥 EXECUTION (GPU → CPU)
+    # EXECUTION (GPU → CPU)
     # =====================================================
     try:
         logger.info(f"{stage}: running GPU matching...")
@@ -143,7 +136,7 @@ def run(paths, config, logger, tool_runner):
         tool_runner.run(_cmd(False), stage=stage + "_cpu")
 
     # =====================================================
-    # 🔥 VALIDATION
+    # VALIDATION
     # =====================================================
     if not _has_matches(db):
         raise RuntimeError(f"{stage}: matching failed")
@@ -152,7 +145,7 @@ def run(paths, config, logger, tool_runner):
     logger.info(f"{stage}: total matches = {total_matches}")
 
     # =====================================================
-    # 🔥 QUALITY DIAGNOSTICS
+    # QUALITY DIAGNOSTICS
     # =====================================================
     if total_matches < 2000:
         logger.warning(f"{stage}: VERY LOW matches → reconstruction likely incomplete")

@@ -47,7 +47,7 @@ def select_or_create_run(project_root: Path):
     runs = find_existing_runs(project_root)
 
     if runs:
-        print("\n⚠️ Existing runs found:\n")
+        print("\n Existing runs found:\n")
 
         for i, run in enumerate(runs):
             print(f"[{i}] {run}")
@@ -65,7 +65,7 @@ def select_or_create_run(project_root: Path):
                 raise ValueError("Invalid run index")
 
             selected_run = runs[idx]
-            print(f"✔ Resuming {selected_run}")
+            print(f"Resuming {selected_run}")
 
             return selected_run, True
 
@@ -80,7 +80,7 @@ def select_or_create_run(project_root: Path):
     new_run = project_root / f"run_{next_id:03d}"
     new_run.mkdir(parents=True, exist_ok=True)
 
-    print(f"✔ Created new run: {new_run.name}")
+    print(f" Created new run: {new_run.name}")
 
     return new_run, False
 
@@ -125,9 +125,6 @@ def get_user_paths():
     return run_path, raw_images_dir
 
 
-# =====================================================
-# PIPELINE SELECTION (E REMOVED)
-# =====================================================
 def get_pipeline_choice():
     print("\n=== Pipeline Selection ===")
     print("A → COLMAP full")
@@ -196,7 +193,7 @@ if __name__ == "__main__":
 
         runner.run()
 
-        print("\n✅ Pipeline completed successfully!")
+        print("\nPipeline completed successfully!")
 
     except Exception as e:
-        print(f"\n❌ Pipeline failed: {e}")
+        print(f"\nPipeline failed: {e}")

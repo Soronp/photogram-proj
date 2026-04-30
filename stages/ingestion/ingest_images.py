@@ -12,7 +12,6 @@ def run(paths, config, logger):
     raw_dir = paths.raw_images
     working_dir = paths.images
 
-    # 🔥 SUPPORT EXTERNAL IMAGE SOURCE
     external_path = config.get("ingestion", {}).get("external_image_path")
 
     if external_path:
@@ -22,13 +21,11 @@ def run(paths, config, logger):
     if not raw_dir.exists():
         raise RuntimeError(f"{stage}: raw_images folder not found")
 
-    # 🔥 CLEAN working directory (CRITICAL)
     if working_dir.exists():
         shutil.rmtree(working_dir)
 
     working_dir.mkdir(parents=True, exist_ok=True)
 
-    # 🔥 Normalize extensions
     images = sorted([
         p for p in raw_dir.iterdir()
         if p.is_file() and p.suffix.lower() in VALID_EXTENSIONS

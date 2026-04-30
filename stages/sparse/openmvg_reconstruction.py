@@ -12,7 +12,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     stage = "openmvg_reconstruction"
 
     # =====================================================
-    # ✅ SINGLE SOURCE OF PATHS
+    # SINGLE SOURCE OF PATHS
     # =====================================================
     paths = ProjectPaths(run_root)
     tool = ToolRunner(logger)
@@ -55,7 +55,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     fallback_focal = focal_multiplier * max(width, height)
 
     # =====================================================
-    # 1. IMAGE LISTING
+    # IMAGE LISTING
     # =====================================================
     def run_listing(use_sensor_db=True):
         cmd = [
@@ -99,7 +99,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     logger.info(f"[{stage}] ✅ Intrinsics OK")
 
     # =====================================================
-    # 2. FEATURE EXTRACTION
+    # FEATURE EXTRACTION
     # =====================================================
     tool.run(
         [
@@ -114,7 +114,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     )
 
     # =====================================================
-    # 3. FEATURE MATCHING
+    # FEATURE MATCHING
     # =====================================================
     tool.run(
         [
@@ -153,7 +153,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     logger.info(f"[{stage}] ✅ Matches OK → {match_file.name}")
 
     # =====================================================
-    # 4. INCREMENTAL SFM
+    # INCREMENTAL SFM
     # =====================================================
     tool.run(
         [
@@ -169,7 +169,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
         return sfm_bin.exists() and sfm_bin.stat().st_size > 20000
 
     # =====================================================
-    # 5. GLOBAL FALLBACK
+    # GLOBAL FALLBACK
     # =====================================================
     if not is_valid():
         logger.warning(f"[{stage}] Incremental weak → Global SfM")
@@ -196,7 +196,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
     logger.info(f"[{stage}] ✅ SfM reconstruction OK")
 
     # =====================================================
-    # 6. STRUCTURE REFINEMENT (OPTIONAL BUT GOOD)
+    # STRUCTURE REFINEMENT
     # =====================================================
     dense_bin = reconstruction_dir / "dense.bin"
 
@@ -215,7 +215,7 @@ def run(run_root: Path, project_root: Path, force: bool, logger):
         logger.info(f"[{stage}] Using refined structure")
 
     # =====================================================
-    # ✅ FINAL OUTPUT (NO OPENMVS HERE)
+    # FINAL OUTPUT (NO OPENMVS HERE)
     # =====================================================
     logger.info(f"[{stage}] DONE (SfM only)")
 

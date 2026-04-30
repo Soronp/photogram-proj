@@ -4,7 +4,7 @@ import subprocess
 
 
 # =====================================================
-# 🔍 COLMAP / GLOMAP MODEL CHECK
+# COLMAP / GLOMAP MODEL CHECK
 # =====================================================
 def _analyze_colmap_model(model_path: Path):
     images = model_path / "images.bin"
@@ -31,7 +31,7 @@ def _analyze_colmap_model(model_path: Path):
 
 
 # =====================================================
-# 🔍 FIND BEST MODEL (COLMAP/GLOMAP)
+# FIND BEST MODEL (COLMAP/GLOMAP)
 # =====================================================
 def _find_best_colmap_model(sparse_root: Path, logger):
     models = [p for p in sparse_root.iterdir() if p.is_dir()]
@@ -60,7 +60,7 @@ def _find_best_colmap_model(sparse_root: Path, logger):
 
 
 # =====================================================
-# 🔍 FIND OPENMVG MODEL
+# FIND OPENMVG MODEL
 # =====================================================
 def _find_openmvg_model(sparse_root: Path):
     sfm_file = sparse_root / "openmvg_reconstruction" / "sfm_data.bin"
@@ -72,7 +72,7 @@ def _find_openmvg_model(sparse_root: Path):
 
 
 # =====================================================
-# 🧹 CLEAN DENSE
+# CLEAN DENSE
 # =====================================================
 def _clean_dense(dense_dir: Path, logger):
     for sub in ["images", "sparse"]:
@@ -83,7 +83,7 @@ def _clean_dense(dense_dir: Path, logger):
 
 
 # =====================================================
-# 🚀 MAIN
+# MAIN
 # =====================================================
 def run(paths, config, logger, tool_runner):
     stage = "image_undistorter"
@@ -99,7 +99,7 @@ def run(paths, config, logger, tool_runner):
         backend = "colmap"
 
     # =====================================================
-    # 🔥 VALIDATION
+    # VALIDATION
     # =====================================================
     if not sparse_root.exists():
         raise RuntimeError("Sparse folder missing")
@@ -110,7 +110,7 @@ def run(paths, config, logger, tool_runner):
     dense_dir.mkdir(parents=True, exist_ok=True)
 
     # =====================================================
-    # 🔵 COLMAP / GLOMAP (UNIFIED PATH)
+    # COLMAP / GLOMAP (UNIFIED PATH)
     # =====================================================
     if backend in ("colmap", "glomap"):
         logger.info(f"image_undistorter: backend = {backend.upper()}")
@@ -131,7 +131,7 @@ def run(paths, config, logger, tool_runner):
         tool_runner.run(cmd, stage=stage)
 
     # =====================================================
-    # 🟢 OPENMVG
+    # OPENMVG
     # =====================================================
     elif backend == "openmvg":
         logger.info("image_undistorter: backend = OPENMVG")
@@ -156,7 +156,7 @@ def run(paths, config, logger, tool_runner):
         raise ValueError(f"Unsupported sparse backend: {backend}")
 
     # =====================================================
-    # ✅ VALIDATION
+    # VALIDATION
     # =====================================================
     out_images = list((dense_dir / "images").glob("*"))
     in_images = list(image_dir.glob("*"))

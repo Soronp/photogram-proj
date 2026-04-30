@@ -7,7 +7,7 @@ def run(paths, config, logger, tool_runner):
     logger.info(f"---- {stage.upper()} ----")
 
     # =====================================================
-    # 📁 WORKSPACE
+    # WORKSPACE
     # =====================================================
     mvs_dir = (paths.run_root / "openmvs").resolve()
     scene = mvs_dir / "scene.mvs"
@@ -19,7 +19,7 @@ def run(paths, config, logger, tool_runner):
     logger.info(f"{stage}: workspace → {mvs_dir}")
 
     # =====================================================
-    # ⚙️ BASE CONFIG
+    # BASE CONFIG
     # =====================================================
     cfg = config.get("dense", {}).get("openmvs", {})
 
@@ -30,7 +30,7 @@ def run(paths, config, logger, tool_runner):
     pipeline_mode = config.get("pipeline_mode", "default")
 
     # =====================================================
-    # 🧠 PARAMETER STRATEGIES (ADAPTIVE)
+    # PARAMETER STRATEGIES (ADAPTIVE)
     # =====================================================
     STRATEGIES = [
         # Attempt 1: strict (default / high quality)
@@ -78,7 +78,7 @@ def run(paths, config, logger, tool_runner):
     ]
 
     # =====================================================
-    # 🧠 COMMAND BUILDER
+    # COMMAND BUILDER
     # =====================================================
     def build_cmd(device, strategy_args):
         cmd = [
@@ -95,7 +95,7 @@ def run(paths, config, logger, tool_runner):
         return cmd
 
     # =====================================================
-    # 🧪 EXECUTION
+    # EXECUTION
     # =====================================================
     def run_process(cmd, tag):
         logger.info(f"[{stage}] RUNNING ({tag})")
@@ -119,7 +119,7 @@ def run(paths, config, logger, tool_runner):
         return result.returncode
 
     # =====================================================
-    # 🚀 ADAPTIVE EXECUTION LOOP
+    # ADAPTIVE EXECUTION LOOP
     # =====================================================
     success = False
     dense_scene = mvs_dir / "scene_dense.mvs"
@@ -147,7 +147,7 @@ def run(paths, config, logger, tool_runner):
             logger.warning(f"{stage}: strategy '{strategy['name']}' failed or weak output")
 
     # =====================================================
-    # ❌ FINAL FAILURE
+    # FINAL FAILURE
     # =====================================================
     if not success:
         raise RuntimeError(f"{stage}: FAILED after all adaptive strategies")

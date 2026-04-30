@@ -3,7 +3,7 @@ import subprocess
 
 
 # =====================================================
-# 🔍 VALIDATE INPUTS
+# VALIDATE INPUTS
 # =====================================================
 
 def _validate_inputs(mvs_dir: Path, mesh_input: Path):
@@ -19,7 +19,7 @@ def _validate_inputs(mvs_dir: Path, mesh_input: Path):
 
 
 # =====================================================
-# 🔍 FIND OUTPUT (ROBUST DETECTION)
+# FIND OUTPUT (ROBUST DETECTION)
 # =====================================================
 
 def _find_output(texture_dir: Path):
@@ -38,7 +38,7 @@ def _find_output(texture_dir: Path):
 
 
 # =====================================================
-# 🚀 MAIN
+# MAIN
 # =====================================================
 
 def run(paths, config, logger, tool_runner):
@@ -46,7 +46,7 @@ def run(paths, config, logger, tool_runner):
     logger.info(f"---- {stage.upper()} ----")
 
     # =====================================================
-    # 📁 PATHS
+    # PATHS
     # =====================================================
     mvs_dir = (paths.run_root / "openmvs").resolve()
     mesh_input = paths.mesh_file.resolve()
@@ -57,7 +57,7 @@ def run(paths, config, logger, tool_runner):
     dense_scene = _validate_inputs(mvs_dir, mesh_input)
 
     # =====================================================
-    # ⚙️ CONFIG
+    # CONFIG
     # =====================================================
     cfg = config.get("texture", {})
     pipeline_mode = config.get("pipeline_mode", "default")
@@ -66,13 +66,13 @@ def run(paths, config, logger, tool_runner):
     resolution_level = cfg.get("resolution_level", 0)
 
     # =====================================================
-    # 🧹 CLEAN OUTPUT
+    # CLEAN OUTPUT
     # =====================================================
     for f in texture_dir.glob("*"):
         f.unlink()
 
     # =====================================================
-    # 🧠 BUILD COMMAND
+    # BUILD COMMAND
     # =====================================================
     output_base = texture_dir / "mesh_textured"
 
@@ -86,7 +86,7 @@ def run(paths, config, logger, tool_runner):
     ]
 
     # =====================================================
-    # 🚀 PIPELINE D (HACK MODE)
+    # PIPELINE D
     # =====================================================
     if pipeline_mode == "D":
         logger.warning(f"[{stage}] PIPELINE D DETECTED → using RELAXED TEXTURING MODE")
@@ -115,7 +115,7 @@ def run(paths, config, logger, tool_runner):
         ]
 
     # =====================================================
-    # ⚙️ DEFAULT (STABLE / HYBRID PIPELINE)
+    # DEFAULT (STABLE / HYBRID PIPELINE)
     # =====================================================
     else:
         cmd += [
@@ -134,7 +134,7 @@ def run(paths, config, logger, tool_runner):
         ]
 
     # =====================================================
-    # 🚀 EXECUTION
+    # EXECUTION
     # =====================================================
     logger.info(f"[{stage}] COMMAND:")
     logger.info(" ".join(cmd))
@@ -158,7 +158,7 @@ def run(paths, config, logger, tool_runner):
         raise RuntimeError(f"{stage}: TextureMesh failed")
 
     # =====================================================
-    # ✅ OUTPUT VALIDATION
+    # OUTPUT VALIDATION
     # =====================================================
     final_output = _find_output(texture_dir)
 
@@ -169,7 +169,7 @@ def run(paths, config, logger, tool_runner):
         )
 
     # =====================================================
-    # 📊 QUALITY CHECK
+    # QUALITY CHECK
     # =====================================================
     size_mb = final_output.stat().st_size / (1024 * 1024)
 

@@ -43,7 +43,7 @@ def run(paths, config, logger):
 
     logger.info(f"{stage}: processing {len(images)} images")
 
-    # 🔥 CLEAN TEMP
+    # CLEAN TEMP
     if temp_dir.exists():
         shutil.rmtree(temp_dir)
     temp_dir.mkdir(parents=True)

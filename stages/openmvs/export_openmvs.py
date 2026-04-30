@@ -2,7 +2,7 @@ from pathlib import Path
 import shutil
 
 # =====================================================
-# 🔍 VALIDATE COLMAP DENSE WORKSPACE
+# VALIDATE COLMAP DENSE WORKSPACE
 # =====================================================
 def _validate_colmap_dense(dense_dir: Path):
     sparse_dir = dense_dir / "sparse"
@@ -25,7 +25,7 @@ def _validate_colmap_dense(dense_dir: Path):
     return sparse_dir, image_dir, images
 
 # =====================================================
-# 🔍 VALIDATE OPENMVG OUTPUT
+# VALIDATE OPENMVG OUTPUT
 # =====================================================
 def _validate_openmvg(paths):
     reconstruction_dir = paths.sparse / "openmvg_reconstruction"
@@ -42,7 +42,7 @@ def _validate_openmvg(paths):
     return sfm_file, image_dir, images
 
 # =====================================================
-# 🏗️ BUILD OPENMVS WORKSPACE (COLMAP-style)
+# BUILD OPENMVS WORKSPACE (COLMAP-style)
 # =====================================================
 def _build_workspace(paths, images, sparse_files=None, logger=None):
     workspace = (paths.run_root / "openmvs_workspace").resolve()
@@ -71,7 +71,7 @@ def _build_workspace(paths, images, sparse_files=None, logger=None):
     return workspace
 
 # =====================================================
-# 🚀 MAIN EXPORT (MULTI-BACKEND)
+# MAIN EXPORT (MULTI-BACKEND)
 # =====================================================
 def run(paths, config, logger, tool_runner):
     stage = "openmvs_export"
@@ -88,7 +88,7 @@ def run(paths, config, logger, tool_runner):
         scene_file.unlink()
 
     # =====================================================
-    # 🔵 COLMAP PIPELINE
+    # COLMAP PIPELINE
     # =====================================================
     if sparse_backend == "colmap":
         dense_dir = paths.dense.resolve()
@@ -106,7 +106,7 @@ def run(paths, config, logger, tool_runner):
         ]
 
     # =====================================================
-    # 🟢 OPENMVG PIPELINE WITH UNDISTORTION
+    # OPENMVG PIPELINE WITH UNDISTORTION
     # =====================================================
     elif sparse_backend == "openmvg":
         sfm_file, image_dir, images = _validate_openmvg(paths)
@@ -148,7 +148,7 @@ def run(paths, config, logger, tool_runner):
     tool_runner.run(cmd, stage=stage)
 
     # =====================================================
-    # ✅ VALIDATION
+    # VALIDATION
     # =====================================================
     if not scene_file.exists():
         raise RuntimeError(f"{stage}: scene.mvs not created")
